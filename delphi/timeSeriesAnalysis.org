@@ -1,0 +1,552 @@
+#+title: Time Series Analysis
+* Rough things to test
+- averages, correlations
+- spectrograms of some examples
+- means and standard deviations in the spectrograms
+- wavelet transform of each signal
+- cross-spectrum
+- varma, if these do look like stochastic models (vector autoregression (moving average + auto-regression))
+* Their Questions
++ What is the distribution of physical activity levels between participants?
++ How does the intensity of a physical activity differ between types of activities?
++ How does the heart rate of the subjects vary over time during different activities?
++ Can you find relationships between the acceleration data and the activity being performed?
+  - build a model that can distinguish running/not running?
+  - running v cycling
+  - predict the activity from the acceleration data
++ Visualize the relationships
++ Limitations
++ other stuff
+* Pre-analysis thoughts on the data
+[[https://archive.ics.uci.edu/ml/datasets/PAMAP2+Physical+Activity+Monitoring][UCI description of the dataset]]
+- time
+- subject
+- activity
+- heart rate
+  sampling rate is ~9Hz
+  on its own, this will give the rough stress of the activity; it wouldn't surprise me if even just averaging this could tell you what activity they're doing
+- imu: temp, acceleration at several resolutions, gyroscope, magnetometer, orientation, across several locations
+  sampling frequency is 100Hz, so roughly 10x the heart rate data
+  + chest
+    The lowest frequency of these sensors, it should easily distinguish cycling from the rest, probably most clearly when starting or stopping in the acceleration
+  + ankle
+    proxy for gait, should be fairly high frequency, and useful for distinguishing several signal types
+  + hand
+    I haven't thought enough about the domain to know for certain how this goes. Guessing it might actually be lower amplitude running than any of the walking
+There are 9 subjects, with only one female subject. Age is more consistent around 27.
+* Packages used
+Scipy has a signal processing toolbox, which will probably be useful in this context. Pandas is useful to manage the labels of the data I figure pywavelets may be useful, depending on how gnarly the signals are, and I recently learned about fCWT, so I wanted to test that out a bit.
+For classification we'll eventually want scikit-learn.
+#+begin_src jupyter-python :session *localhost*
+import pywt
+import fcwt
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import signal
+from scipy import interpolate
+import sklearn
+import pandas as pd
+#+end_src
+
+#+RESULTS:
+
+* Initial processing
+First, we define a function to load a particular subject and set, and then one to make a full table.
+The raw data has a couple of invalid columns, which we need to drop, as well as transition activities with ~activityID=0~ that we need to drop.
+To deal with disconnected devices returning ~NaN~, we do some cubic spline interpolation, and include a flag to warn the user if there's a significant number of ~NaN~ in a particular table, and return a boolean matrix indicating former ~NaN~ locations.
+
+The Heart rate data in particular has many ~NaN~s, since it's sampled at ~1/10th the frequency of the other data. Given that it is a much lower frequency signal to begin with however (a potentially deadly heart rate of 180bpm is only a 3Hz signal), this interpolation should cause no problems.
+
+Finally, ~cols~ gives the column labels after dropping the orientation data from the hand, chest and ankle IMU. ~* small *~ can probably be ignored, as it's scale was $\pm 6g$, which is apparently easily saturated by some activities in the dataset.
+Leaving it in as something to be explored however.
+
+In addition, I'm going to add a couple of variables: since the direction probably matters less than the total acceleration, ~chest~, ~hand~ and ~ankle~ give the magnitude of the vector ~('chest x', 'chest y', 'chest z')~. Similar stats for ~small~, ~gyro~, and ~magne~.
+#+begin_src jupyter-python :session *localhost*
+cols = ['time', 'activity', 'heart rate (bpm)', 'hand temperature', 'hand x', 'hand y', 'hand z', 'hand small x', 'hand small y', 'hand small z', 'hand gyro x',  'hand gyro y',  'hand gyro z',  'hand magne x',  'hand magne y',  'hand magne z', 'chest temperature', 'chest x', 'chest y', 'chest z', 'chest small x', 'chest small y', 'chest small z', 'chest gyro x',  'chest gyro y',  'chest gyro z',  'chest magne x',  'chest magne y',  'chest magne z', 'ankle temperature', 'ankle x', 'ankle y', 'ankle z', 'ankle small x', 'ankle small y', 'ankle small z', 'ankle gyro x',  'ankle gyro y',  'ankle gyro z',  'ankle magne x',  'ankle magne y',  'ankle magne z']
+def load_subject(subject_number, dataset):
+    """initial cleaning"""
+    raw = np.loadtxt(f"PAMAP2_Dataset/{dataset}/subject10{subject_number}.dat")
+    # drop the orientation data (rows 16:20, 33:37, and 50:54), as they're invalid
+    basic = raw[:,np.r_[:16, 20:33, 37:50]]
+    # drop all activities labeled 0, as these are transient
+    basic = basic[basic[:,1] != 0]
+    n_samples,n_sensors = basic.shape
+    # keep a record of where all the NaN's are, in case there are runs that are too large and we need to drop data
+    nans = np.isnan(basic)
+    n_nans = np.isnan(basic).sum(0)/n_samples
+    # do some interpolation using scipy to fill in the NaNs using neighboring points; using cubic splines, which is probably a little overkill.
+    for col_ii in range(2,basic.shape[1]):
+        non_nan_times = basic[np.logical_not(nans[:,col_ii]), 0]
+        non_nan = basic[np.logical_not(nans[:,col_ii]), col_ii]
+        interpolator = interpolate.interp1d(non_nan_times, non_nan, kind="cubic", axis=0, fill_value='extrapolate')
+        basic[nans[:, col_ii], col_ii] = interpolator(basic[nans[:, col_ii], 0]) # fill in the original data matrix NaNs with interpolated values
+        if col_ii>2 and n_nans[col_ii] > .01:
+            print(f"warning: more than 1% of the data for {cols[col_ii]} is NaNs")
+    frame = pd.DataFrame(basic, columns = cols)
+    frame['hand'] = frame[['hand x', 'hand y', 'hand z']].apply(np.linalg.norm,axis=1)
+    frame['chest'] = frame[['chest x', 'chest y', 'chest z']].apply(np.linalg.norm,axis=1)
+    frame['ankle'] = frame[['ankle x', 'ankle y', 'ankle z']].apply(np.linalg.norm,axis=1)
+
+    frame['hand small'] = frame[['hand small x', 'hand small y', 'hand small z']].apply(np.linalg.norm,axis=1)
+    frame['chest small'] = frame[['chest small x', 'chest small y', 'chest small z']].apply(np.linalg.norm,axis=1)
+    frame['ankle small'] = frame[['ankle small x', 'ankle small y', 'ankle small z']].apply(np.linalg.norm,axis=1)
+
+    frame['hand gyro'] = frame[['hand gyro x', 'hand gyro y', 'hand gyro z']].apply(np.linalg.norm,axis=1)
+    frame['chest gyro'] = frame[['chest gyro x', 'chest gyro y', 'chest gyro z']].apply(np.linalg.norm,axis=1)
+    frame['ankle gyro'] = frame[['ankle gyro x', 'ankle gyro y', 'ankle gyro z']].apply(np.linalg.norm,axis=1)
+
+    frame['hand magne'] = frame[['hand magne x', 'hand magne y', 'hand magne z']].apply(np.linalg.norm,axis=1)
+    frame['chest magne'] = frame[['chest magne x', 'chest magne y', 'chest magne z']].apply(np.linalg.norm,axis=1)
+    frame['ankle magne'] = frame[['ankle magne x', 'ankle magne y', 'ankle magne z']].apply(np.linalg.norm,axis=1)
+    return frame, pd.DataFrame(n_nans[np.newaxis, :], columns = cols)
+def full_table():
+    """create a data frame containing every subject and source; needs additional columns denoting the subject id and whether its the main examples or the optional ones"""
+    full_frame = pd.DataFrame()
+    full_frame, full_nans = load_subject(1, "Protocol")
+    full_frame['subject'] = 1
+    full_frame['Protocol'] = True
+    full_nans['subject'] = 1
+    full_nans['Protocol'] = True
+    for subject_ii in range(2,10):
+        tmp_frame, tmp_nans = load_subject(subject_ii, "Protocol")
+        tmp_frame['subject'] = subject_ii
+        tmp_frame['Protocol'] = True
+        tmp_nans['subject'] = subject_ii
+        tmp_nans['Protocol'] = True
+        full_frame = pd.concat([full_frame, tmp_frame])
+        full_nans = pd.concat([full_nans, tmp_nans])
+    for subject_ii in [1,5,6,8,9]:
+        tmp_frame, tmp_nans = load_subject(subject_ii, "Optional")
+        tmp_frame['subject'] = subject_ii
+        tmp_frame['Protocol'] = False
+        tmp_nans['subject'] = subject_ii
+        tmp_nans['Protocol'] = False
+        full_frame = pd.concat([full_frame, tmp_frame])
+        full_nans = pd.concat([full_nans, tmp_nans])
+    return full_frame, full_nans
+frame, nans = full_table()
+#+end_src
+
+#+RESULTS:
+
+thankfully, none of the non-heart rate variables have more than 1% ~NaN~, so we don't need to remove any of the data for now.
+
+#+begin_src jupyter-python :session *localhost*
+# frame['hand'] = frame[['hand x', 'hand y', 'hand z']].apply(np.linalg.norm,axis=1)
+frame
+#+end_src
+
+#+RESULTS:
+#+begin_example
+           time  activity  heart rate (bpm)  hand temperature   hand x  \
+0         37.66       1.0        100.106697            30.375  2.21530
+1         37.67       1.0        100.071815            30.375  2.29196
+2         37.68       1.0        100.042679            30.375  2.29090
+3         37.69       1.0        100.018877            30.375  2.21800
+4         37.70       1.0        100.000000            30.375  2.30106
+...         ...       ...               ...               ...      ...
+158868  1936.14      20.0        177.998621            24.875 -6.42779
+158869  1936.15      20.0        177.997952            24.875 -6.39107
+158870  1936.16      20.0        177.997164            24.875 -6.41763
+158871  1936.17      20.0        177.996250            24.875 -6.46049
+158872  1936.18      20.0        177.995202            24.875 -6.64998
+
+         hand y   hand z  hand small x  hand small y  hand small z  ...  \
+0       8.27915  5.58753       2.24689       8.55387       5.77143  ...
+1       7.67288  5.74467       2.27373       8.14592       5.78739  ...
+2       7.14240  5.82342       2.26966       7.66268       5.78846  ...
+3       7.14365  5.89930       2.22177       7.25535       5.88000  ...
+4       7.25857  6.09259       2.20720       7.24042       5.95555  ...
+...         ...      ...           ...           ...           ...  ...
+158868  6.84232  2.80728      -6.52140       6.75658       2.56787  ...
+158869  6.69028  2.80834      -6.55066       6.75689       2.67360  ...
+158870  6.57977  3.15471      -6.53586       6.56061       2.84013  ...
+158871  6.42730  3.03912      -6.55081       6.53056       2.88551  ...
+158872  6.54224  2.99740      -6.59577       6.54600       2.90062  ...
+
+        chest small  ankle small  hand gyro  chest gyro  ankle gyro  \
+0          9.822404     9.796073   0.039483    0.066375    0.027921
+1          9.852047     9.748582   0.173852    0.067424    0.021749
+2          9.873164     9.764360   0.238506    0.060338    0.063439
+3          9.865334     9.756044   0.194311    0.090952    0.046244
+4          9.817284     9.809110   0.072467    0.041521    0.049304
+...             ...          ...        ...         ...         ...
+158868     9.810042     9.867270   0.117788    0.161901    0.021327
+158869     9.760977     9.866938   0.110464    0.127745    0.055200
+158870     9.734297     9.857776   0.090651    0.172837    0.063669
+158871     9.577592     9.872424   0.085489    0.162392    0.038844
+158872     9.545330     9.805258   0.065467    0.182836    0.025506
+
+        hand magne  chest magne  ankle magne  subject  Protocol
+0        71.369737    67.332172    92.196177        1      True
+1        71.745163    66.692157    91.833822        1      True
+2        70.749974    67.164701    91.415884        1      True
+3        71.198631    66.494381    91.755312        1      True
+4        70.716057    66.439341    91.396062        1      True
+...            ...          ...          ...      ...       ...
+158868   54.975891    50.736188    51.023924        9     False
+158869   55.690979    50.253302    50.359110        9     False
+158870   54.701982    49.822665    51.166757        9     False
+158871   55.171737    49.673237    50.788652        9     False
+158872   55.628630    50.068217    50.618621        9     False
+
+[2724953 rows x 56 columns]
+#+end_example
+
+* Simple Summary statistics
+To start with, let's look at the summary statistics, as separated by the activity. In addition, lets create much coarser labels that correspond to inactive (0), active (1), and exercise (2). ~coarser_map[i]~ gives the integer corresponding to the coarser label.
+#+begin_src jupyter-python :session *localhost*
+activity_labels = {1: 'lying', 2:'sitting', 3:'standing', 17:'ironing', 16:'vacuuming', 12:'ascending stairs', 13:'descending stairs', 4:'normal walking', 7:'Nordic walking', 6:'cycling', 5:'running', 24:'rope jumping', 9:'watching tv', 10:'computer work', 11:'car driving', 18:'folding laundry', 19:'house cleaning', 20:"playing soccer"}
+activity_labels_reversed = {v : k for k,v in activity_labels.items()}
+coarser_labels = {1: 0, 2: 0, 3: 0, 17: 1, 16: 1, 12: 2, 13: 2, 4: 1, 7: 2, 6: 2, 5: 2, 24: 2, 9: 0, 10: 0, 11: 0, 18: 1, 19: 1, 20: 2}
+coarser_labels_names = {0: "inactive", 1 : "active", 2:"exercise"}
+
+# actually adding them into the frame
+frame['activity label'] = frame['activity'].map(activity_labels)
+frame['coarse activity'] = frame['activity'].map(coarser_labels)
+frame['coarse activity label'] = frame['coarse activity'].map(coarser_labels_names)
+#+end_src
+
+#+RESULTS:
+
+#+begin_src jupyter-python :session *localhost*
+summary_stats = frame.drop(['time', 'activity', 'coarse activity', 'coarse activity label'],axis=1).groupby('activity label').describe()
+#+end_src
+
+
+
+#+RESULTS:
+
+#+begin_src jupyter-python :session *localhost*
+summary_stats['heart rate (bpm)'].sort_values(by='mean')
+#+end_src
+
+#+RESULTS:
+#+begin_example
+                      count        mean        std         min         25%  \
+activity label
+lying              192523.0   75.536043  10.536810   56.892348   69.995304
+computer work      309935.0   75.729955   8.315868   59.890326   69.000000
+sitting            185188.0   80.013060   8.008474   62.891149   75.000000
+watching tv         83646.0   83.407133   5.521208   74.892348   80.239726
+standing           189931.0   88.554788  10.010566   67.892312   80.999996
+ironing            238690.0   90.062311   8.929636   68.891149   84.998493
+folding laundry     99878.0   90.269954  11.506504   69.892256   78.000000
+house cleaning     187188.0   96.417751  13.479741   67.915654   87.000000
+car driving         54519.0  103.066983   7.304963   88.891073   98.383478
+vacuuming          175353.0  104.195473  13.512830   74.880503   95.000000
+normal walking     238761.0  112.786106   9.531551   85.891073  105.999997
+Nordic walking     188107.0  123.830869  10.980179   77.892344  117.996631
+cycling            164600.0  124.884293   8.609884   80.915657  119.010135
+descending stairs  104944.0  129.156950  22.952480   77.892339  109.005614
+ascending stairs   117216.0  129.529713  20.898364   70.891149  114.117585
+running             98199.0  156.595770  22.778271   80.892257  143.999045
+rope jumping        49360.0  161.986839  21.664445  120.891073  142.999861
+playing soccer      46915.0  168.780179  23.659120  104.877507  167.999181
+
+                          50%         75%         max
+activity label
+lying               73.995304   80.998869  115.107744
+computer work       73.006281   83.000000  102.107656
+sitting             78.999959   83.984519  113.107744
+watching tv         82.000000   84.005870  109.107661
+standing            88.612543   96.340207  112.107744
+ironing             88.905576   93.996939  122.107698
+folding laundry     91.984245   97.064489  117.107655
+house cleaning      94.000000  106.000590  128.107658
+car driving        102.000000  106.119340  128.122493
+vacuuming          101.000000  110.993210  140.122496
+normal walking     114.973125  120.028845  128.107659
+Nordic walking     124.978093  129.000000  147.135843
+cycling            124.999989  131.999518  144.107544
+descending stairs  129.000000  149.107659  175.107744
+ascending stairs   130.000000  146.239783  171.099443
+running            165.940556  172.000006  196.107652
+rope jumping       165.998933  179.000000  202.107688
+playing soccer     180.000000  182.000000  191.107652
+#+end_example
+
+Here we have the averages per activity for heartrate. Running, rope jumping, and playing soccer are all outliers at 156 to 168, though they are also somewhat on the low end of number of samples. Interestingly, all categories are roughly within one standard deviation of one another, so heart rate alone will probably not be enough to distinguish fine-grained activities.
+
+Mostly out of curiosity, lets take a look at the temperature reading from the hand IMU:
+
+#+begin_src jupyter-python :session *localhost*
+summary_stats['hand temperature'].sort_values(by='mean')
+#+end_src
+
+#+RESULTS:
+#+begin_example
+                      count       mean       std        min      25%      50%  \
+activity label
+playing soccer      46915.0  27.270159  2.779595  24.874921  25.0625  25.1875
+rope jumping        49360.0  29.720052  2.490725  24.875000  28.4375  30.1875
+running             98199.0  30.818058  2.086611  27.500000  28.8125  30.8125
+cycling            164600.0  31.008824  1.997441  27.562500  29.3125  31.0625
+Nordic walking     188107.0  31.534647  1.755120  28.937500  30.3125  30.7500
+computer work      309935.0  32.114982  1.214480  29.000000  31.2500  32.1250
+normal walking     238761.0  32.300379  1.382759  28.687500  31.3750  32.5625
+lying              192523.0  32.726154  1.405145  30.187500  31.3125  32.8750
+sitting            185188.0  33.262085  1.103127  31.500000  32.1250  33.5000
+descending stairs  104944.0  33.322055  0.886232  31.562500  32.4375  33.5625
+ascending stairs   117216.0  33.527258  0.876445  31.750000  32.5625  33.7500
+standing           189931.0  33.637791  0.856881  32.187500  33.0000  33.5625
+folding laundry     99878.0  33.666116  0.635729  32.937500  33.0625  33.8125
+ironing            238690.0  34.022834  0.773919  32.625000  33.4375  33.9375
+house cleaning     187188.0  34.024332  0.869849  32.562500  33.3125  33.7500
+vacuuming          175353.0  34.178360  0.652064  33.062500  33.6875  34.1250
+car driving         54519.0  34.484870  0.182332  34.125000  34.3125  34.4375
+watching tv         83646.0  35.197931  0.178430  34.875000  35.0625  35.1875
+
+                       75%        max
+activity label
+playing soccer     30.7500  30.812506
+rope jumping       30.8125  33.875001
+running            33.8125  33.875000
+cycling            32.7500  34.687500
+Nordic walking     33.0000  34.938604
+computer work      33.0000  34.500000
+normal walking     33.0625  34.875000
+lying              33.8125  34.937500
+sitting            34.2500  35.062500
+descending stairs  33.8750  34.875000
+ascending stairs   34.1250  35.125000
+standing           34.2500  35.250000
+folding laundry    34.5625  34.562500
+ironing            34.6875  35.500000
+house cleaning     34.7500  35.500000
+vacuuming          34.6250  35.500000
+car driving        34.6250  34.812500
+watching tv        35.3750  35.500000
+#+end_example
+
+For comparison, the [[https://en.wikipedia.org/wiki/Human_body_temperature][average human body temperature]] is 36.5–37.5 °C, so even the highest hand measurement is lower than one's core body temperature. Hand temperature roughly negatively correlate with activity; as you exercise, your body draws blood out of your periphery and into your core and muscles. Interestingly, the chest temperature, while generally closer to the actual core temperature, is still lower.
+
+#+begin_src jupyter-python :session *localhost*
+summary_stats['chest temperature'].sort_values(by='mean')
+#+end_src
+
+#+RESULTS:
+#+begin_example
+                      count       mean       std       min      25%      50%  \
+activity label
+playing soccer      46915.0  33.212884  0.805097  32.31250  32.5625  32.6875
+rope jumping        49360.0  33.605086  1.472824  31.93750  32.1875  33.7500
+computer work      309935.0  33.845430  1.275583  31.12500  32.8750  33.8750
+running             98199.0  34.398012  1.428991  32.06250  33.3750  34.0625
+lying              192523.0  35.087787  1.560122  32.18750  33.6250  34.9375
+cycling            164600.0  35.725755  1.602098  32.81250  34.5000  35.3750
+sitting            185188.0  35.824338  1.255412  33.68750  34.7500  35.7500
+house cleaning     187188.0  36.037150  1.085068  33.93750  35.0625  36.0625
+Nordic walking     188107.0  36.158435  1.675612  33.74999  34.8125  35.6875
+standing           189931.0  36.165015  1.068752  34.31250  35.2500  35.9375
+car driving         54519.0  36.370270  0.149944  36.06250  36.2500  36.3750
+folding laundry     99878.0  36.459526  0.882027  34.75000  36.0625  36.9375
+ironing            238690.0  36.665357  0.927366  34.93750  36.0625  36.4375
+normal walking     238761.0  37.007254  0.827822  35.25000  36.4375  37.1250
+descending stairs  104944.0  37.022019  0.786143  35.43750  36.6875  36.7500
+ascending stairs   117216.0  37.054112  0.872753  35.18750  36.6875  36.8750
+vacuuming          175353.0  37.057773  0.891030  35.50000  36.5625  37.1875
+watching tv         83646.0  37.336685  0.194285  36.87500  37.1875  37.3750
+
+                       75%        max
+activity label
+playing soccer     34.2500  34.250000
+rope jumping       34.1250  36.500000
+computer work      34.8750  36.250000
+running            36.3750  36.812500
+lying              36.6875  37.437500
+cycling            37.3750  38.312500
+sitting            37.0000  37.625000
+house cleaning     37.1875  37.500000
+Nordic walking     38.3125  38.577874
+standing           37.4375  37.687500
+car driving        36.5000  36.625000
+folding laundry    37.2500  37.375000
+ironing            37.6250  38.125000
+normal walking     37.6250  38.437500
+descending stairs  37.8125  38.000000
+ascending stairs   37.8125  38.187500
+vacuuming          37.9375  38.250000
+watching tv        37.5000  37.562500
+#+end_example
+
+Turning to the acceleration data, first lets look at the movement of the core
+#+begin_src jupyter-python :session *localhost*
+summary_stats['chest'].sort_values(by='mean')
+#+end_src
+
+#+RESULTS:
+#+begin_example
+                      count       mean        std       min       25%  \
+activity label
+lying              192523.0   9.587474   0.293785  3.864523  9.460779
+watching tv         83646.0   9.715500   0.205635  7.434601  9.618258
+sitting            185188.0   9.819690   0.300539  5.138014  9.713096
+standing           189931.0   9.836934   0.269169  3.032830  9.721561
+computer work      309935.0   9.843228   0.255740  3.261755  9.690674
+ironing            238690.0   9.956556   0.326937  2.583077  9.789140
+car driving         54519.0   9.968828   0.448085  0.811480  9.754746
+folding laundry     99878.0   9.973617   0.461190  5.824929  9.736265
+house cleaning     187188.0  10.021077   0.918631  2.009884  9.658685
+normal walking     238761.0  10.112868   3.239062  1.779430  7.693999
+vacuuming          175353.0  10.134595   0.842794  4.386731  9.682469
+ascending stairs   117216.0  10.158468   3.432132  0.902167  8.107039
+descending stairs  104944.0  10.173882   4.853056  0.127578  7.352147
+cycling            164600.0  10.205396   1.597956  0.811480  9.310021
+Nordic walking     188107.0  10.219269   4.125512  0.450979  6.760642
+playing soccer      46915.0  11.481581   6.851165  0.318019  8.142076
+running             98199.0  11.924508   9.334042  0.102686  4.003827
+rope jumping        49360.0  13.045252  13.510043  0.061476  4.308789
+
+                         50%        75%         max
+activity label
+lying               9.567980   9.683376   22.425921
+watching tv         9.723783   9.812081   14.491353
+sitting             9.802401   9.902520   16.506993
+standing            9.815770   9.932196   18.610969
+computer work       9.819635  10.008822   19.007271
+ironing             9.941560  10.105507   16.804097
+car driving         9.933963  10.151250   15.466242
+folding laundry     9.927671  10.155044   15.642570
+house cleaning      9.929600  10.272134   54.126240
+normal walking     10.089537  12.463721   33.610029
+vacuuming          10.058788  10.519714   22.784502
+ascending stairs    9.832235  11.680017   40.177091
+descending stairs   9.762447  11.826813   50.926868
+cycling            10.103778  11.025641   34.329004
+Nordic walking     10.237648  13.329716   28.216694
+playing soccer      9.904972  12.869584  100.184404
+running             9.389884  19.580110   63.412393
+rope jumping        9.493158  14.780505  155.728100
+#+end_example
+
+One thing to notice is that the highest mean value activities also have the largest standard deviation, and even lying down has a max value that is higher than the typical mean. This is data that the average value obscures the important time variation.
+
+* Plotting utilities
+We begin by making a function that
+#+begin_src jupyter-python :session *localhost*
+%matplotlib inline
+
+f0 = 0.1 #lowest frequency
+f1 = 5 #highest frequency
+fn = 300 #number of frequencies
+
+# selecting all ascending stairs examples
+plt.plot(frame['time'][asc_stairs], frame["heart rate (bpm)"][asc_stairs])
+#plot cwt
+# fcwt.plot(basic[:,3], fs, f0=f0, f1=f1, fn=fn)
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+# [goto error]
+#+begin_example
+[0;31m---------------------------------------------------------------------------[0m
+[0;31mTypeError[0m                                 Traceback (most recent call last)
+Cell [0;32mIn[226], line 12[0m
+[1;32m      5[0m fn [38;5;241m=[39m [38;5;241m300[39m [38;5;66;03m#number of frequencies[39;00m
+[1;32m      8[0m [38;5;66;03m# selecting all ascending stairs examples[39;00m
+[1;32m      9[0m [38;5;66;03m# plt.plot(frame['time'][asc_stairs], frame["heart rate (bpm)"][asc_stairs])[39;00m
+[1;32m     10[0m [38;5;66;03m#plot cwt[39;00m
+[1;32m     11[0m [38;5;66;03m# fcwt.plot(basic[:,3], fs, f0=f0, f1=f1, fn=fn)[39;00m
+[0;32m---> 12[0m [43msns[49m[38;5;241;43m.[39;49m[43mrelplot[49m[43m([49m[43mdata[49m[38;5;241;43m=[39;49m[43mframe[49m[43m,[49m[43m [49m[43mx[49m[38;5;241;43m=[39;49m[38;5;124;43m"[39;49m[38;5;124;43mtime[39;49m[38;5;124;43m"[39;49m[43m,[49m[43m [49m[43my[49m[38;5;241;43m=[39;49m[38;5;124;43m"[39;49m[38;5;124;43mheart rate (bpm)[39;49m[38;5;124;43m"[39;49m[43m,[49m[43m [49m[43mhue[49m[38;5;241;43m=[39;49m[38;5;124;43m"[39;49m[38;5;124;43mactivity[39;49m[38;5;124;43m"[39;49m[43m,[49m[43m [49m[43mkind[49m[38;5;241;43m=[39;49m[38;5;124;43m"[39;49m[38;5;124;43mline[39;49m[38;5;124;43m"[39;49m[43m)[49m
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/seaborn/relational.py:955[0m, in [0;36mrelplot[0;34m(data, x, y, hue, size, style, units, row, col, col_wrap, row_order, col_order, palette, hue_order, hue_norm, sizes, size_order, size_norm, markers, dashes, style_order, legend, kind, height, aspect, facet_kws, **kwargs)[0m
+[1;32m    946[0m g [38;5;241m=[39m FacetGrid(
+[1;32m    947[0m     data[38;5;241m=[39mfull_data[38;5;241m.[39mdropna(axis[38;5;241m=[39m[38;5;241m1[39m, how[38;5;241m=[39m[38;5;124m"[39m[38;5;124mall[39m[38;5;124m"[39m),
+[1;32m    948[0m     [38;5;241m*[39m[38;5;241m*[39mgrid_kws,
+[0;32m   (...)[0m
+[1;32m    951[0m     [38;5;241m*[39m[38;5;241m*[39mfacet_kws
+[1;32m    952[0m )
+[1;32m    954[0m [38;5;66;03m# Draw the plot[39;00m
+[0;32m--> 955[0m [43mg[49m[38;5;241;43m.[39;49m[43mmap_dataframe[49m[43m([49m[43mfunc[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;241;43m*[39;49m[43mplot_kws[49m[43m)[49m
+[1;32m    957[0m [38;5;66;03m# Label the axes, using the original variables[39;00m
+[1;32m    958[0m [38;5;66;03m# Pass "" when the variable name is None to overwrite internal variables[39;00m
+[1;32m    959[0m g[38;5;241m.[39mset_axis_labels(variables[38;5;241m.[39mget([38;5;124m"[39m[38;5;124mx[39m[38;5;124m"[39m) [38;5;129;01mor[39;00m [38;5;124m"[39m[38;5;124m"[39m, variables[38;5;241m.[39mget([38;5;124m"[39m[38;5;124my[39m[38;5;124m"[39m) [38;5;129;01mor[39;00m [38;5;124m"[39m[38;5;124m"[39m)
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/seaborn/axisgrid.py:819[0m, in [0;36mFacetGrid.map_dataframe[0;34m(self, func, *args, **kwargs)[0m
+[1;32m    816[0m     kwargs[[38;5;124m"[39m[38;5;124mdata[39m[38;5;124m"[39m] [38;5;241m=[39m data_ijk
+[1;32m    818[0m     [38;5;66;03m# Draw the plot[39;00m
+[0;32m--> 819[0m     [38;5;28;43mself[39;49m[38;5;241;43m.[39;49m[43m_facet_plot[49m[43m([49m[43mfunc[49m[43m,[49m[43m [49m[43max[49m[43m,[49m[43m [49m[43margs[49m[43m,[49m[43m [49m[43mkwargs[49m[43m)[49m
+[1;32m    821[0m [38;5;66;03m# For axis labels, prefer to use positional args for backcompat[39;00m
+[1;32m    822[0m [38;5;66;03m# but also extract the x/y kwargs and use if no corresponding arg[39;00m
+[1;32m    823[0m axis_labels [38;5;241m=[39m [kwargs[38;5;241m.[39mget([38;5;124m"[39m[38;5;124mx[39m[38;5;124m"[39m, [38;5;28;01mNone[39;00m), kwargs[38;5;241m.[39mget([38;5;124m"[39m[38;5;124my[39m[38;5;124m"[39m, [38;5;28;01mNone[39;00m)]
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/seaborn/axisgrid.py:848[0m, in [0;36mFacetGrid._facet_plot[0;34m(self, func, ax, plot_args, plot_kwargs)[0m
+[1;32m    846[0m     plot_args [38;5;241m=[39m []
+[1;32m    847[0m     plot_kwargs[[38;5;124m"[39m[38;5;124max[39m[38;5;124m"[39m] [38;5;241m=[39m ax
+[0;32m--> 848[0m [43mfunc[49m[43m([49m[38;5;241;43m*[39;49m[43mplot_args[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;241;43m*[39;49m[43mplot_kwargs[49m[43m)[49m
+[1;32m    850[0m [38;5;66;03m# Sort out the supporting information[39;00m
+[1;32m    851[0m [38;5;28mself[39m[38;5;241m.[39m_update_legend_data(ax)
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/seaborn/relational.py:645[0m, in [0;36mlineplot[0;34m(data, x, y, hue, size, style, units, palette, hue_order, hue_norm, sizes, size_order, size_norm, dashes, markers, style_order, estimator, errorbar, n_boot, seed, orient, sort, err_style, err_kws, legend, ci, ax, **kwargs)[0m
+[1;32m    642[0m color [38;5;241m=[39m kwargs[38;5;241m.[39mpop([38;5;124m"[39m[38;5;124mcolor[39m[38;5;124m"[39m, kwargs[38;5;241m.[39mpop([38;5;124m"[39m[38;5;124mc[39m[38;5;124m"[39m, [38;5;28;01mNone[39;00m))
+[1;32m    643[0m kwargs[[38;5;124m"[39m[38;5;124mcolor[39m[38;5;124m"[39m] [38;5;241m=[39m _default_color(ax[38;5;241m.[39mplot, hue, color, kwargs)
+[0;32m--> 645[0m [43mp[49m[38;5;241;43m.[39;49m[43mplot[49m[43m([49m[43max[49m[43m,[49m[43m [49m[43mkwargs[49m[43m)[49m
+[1;32m    646[0m [38;5;28;01mreturn[39;00m ax
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/seaborn/relational.py:489[0m, in [0;36m_LinePlotter.plot[0;34m(self, ax, kws)[0m
+[1;32m    486[0m [38;5;28;01mif[39;00m [38;5;28mself[39m[38;5;241m.[39merr_style [38;5;241m==[39m [38;5;124m"[39m[38;5;124mband[39m[38;5;124m"[39m:
+[1;32m    488[0m     func [38;5;241m=[39m {[38;5;124m"[39m[38;5;124mx[39m[38;5;124m"[39m: ax[38;5;241m.[39mfill_between, [38;5;124m"[39m[38;5;124my[39m[38;5;124m"[39m: ax[38;5;241m.[39mfill_betweenx}[orient]
+[0;32m--> 489[0m     [43mfunc[49m[43m([49m
+[1;32m    490[0m [43m        [49m[43msub_data[49m[43m[[49m[43morient[49m[43m][49m[43m,[49m
+[1;32m    491[0m [43m        [49m[43msub_data[49m[43m[[49m[38;5;124;43mf[39;49m[38;5;124;43m"[39;49m[38;5;132;43;01m{[39;49;00m[43mother[49m[38;5;132;43;01m}[39;49;00m[38;5;124;43mmin[39;49m[38;5;124;43m"[39;49m[43m][49m[43m,[49m[43m [49m[43msub_data[49m[43m[[49m[38;5;124;43mf[39;49m[38;5;124;43m"[39;49m[38;5;132;43;01m{[39;49;00m[43mother[49m[38;5;132;43;01m}[39;49;00m[38;5;124;43mmax[39;49m[38;5;124;43m"[39;49m[43m][49m[43m,[49m
+[1;32m    492[0m [43m        [49m[43mcolor[49m[38;5;241;43m=[39;49m[43mline_color[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;241;43m*[39;49m[43merr_kws[49m
+[1;32m    493[0m [43m    [49m[43m)[49m
+[1;32m    495[0m [38;5;28;01melif[39;00m [38;5;28mself[39m[38;5;241m.[39merr_style [38;5;241m==[39m [38;5;124m"[39m[38;5;124mbars[39m[38;5;124m"[39m:
+[1;32m    497[0m     error_param [38;5;241m=[39m {
+[1;32m    498[0m         [38;5;124mf[39m[38;5;124m"[39m[38;5;132;01m{[39;00mother[38;5;132;01m}[39;00m[38;5;124merr[39m[38;5;124m"[39m: (
+[1;32m    499[0m             sub_data[other] [38;5;241m-[39m sub_data[[38;5;124mf[39m[38;5;124m"[39m[38;5;132;01m{[39;00mother[38;5;132;01m}[39;00m[38;5;124mmin[39m[38;5;124m"[39m],
+[1;32m    500[0m             sub_data[[38;5;124mf[39m[38;5;124m"[39m[38;5;132;01m{[39;00mother[38;5;132;01m}[39;00m[38;5;124mmax[39m[38;5;124m"[39m] [38;5;241m-[39m sub_data[other],
+[1;32m    501[0m         )
+[1;32m    502[0m     }
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/matplotlib/__init__.py:1423[0m, in [0;36m_preprocess_data.<locals>.inner[0;34m(ax, data, *args, **kwargs)[0m
+[1;32m   1420[0m [38;5;129m@functools[39m[38;5;241m.[39mwraps(func)
+[1;32m   1421[0m [38;5;28;01mdef[39;00m [38;5;21minner[39m(ax, [38;5;241m*[39margs, data[38;5;241m=[39m[38;5;28;01mNone[39;00m, [38;5;241m*[39m[38;5;241m*[39mkwargs):
+[1;32m   1422[0m     [38;5;28;01mif[39;00m data [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m:
+[0;32m-> 1423[0m         [38;5;28;01mreturn[39;00m [43mfunc[49m[43m([49m[43max[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;28;43mmap[39;49m[43m([49m[43msanitize_sequence[49m[43m,[49m[43m [49m[43margs[49m[43m)[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;241;43m*[39;49m[43mkwargs[49m[43m)[49m
+[1;32m   1425[0m     bound [38;5;241m=[39m new_sig[38;5;241m.[39mbind(ax, [38;5;241m*[39margs, [38;5;241m*[39m[38;5;241m*[39mkwargs)
+[1;32m   1426[0m     auto_label [38;5;241m=[39m (bound[38;5;241m.[39marguments[38;5;241m.[39mget(label_namer)
+[1;32m   1427[0m                   [38;5;129;01mor[39;00m bound[38;5;241m.[39mkwargs[38;5;241m.[39mget(label_namer))
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/matplotlib/axes/_axes.py:5367[0m, in [0;36mAxes.fill_between[0;34m(self, x, y1, y2, where, interpolate, step, **kwargs)[0m
+[1;32m   5365[0m [38;5;28;01mdef[39;00m [38;5;21mfill_between[39m([38;5;28mself[39m, x, y1, y2[38;5;241m=[39m[38;5;241m0[39m, where[38;5;241m=[39m[38;5;28;01mNone[39;00m, interpolate[38;5;241m=[39m[38;5;28;01mFalse[39;00m,
+[1;32m   5366[0m                  step[38;5;241m=[39m[38;5;28;01mNone[39;00m, [38;5;241m*[39m[38;5;241m*[39mkwargs):
+[0;32m-> 5367[0m     [38;5;28;01mreturn[39;00m [38;5;28;43mself[39;49m[38;5;241;43m.[39;49m[43m_fill_between_x_or_y[49m[43m([49m
+[1;32m   5368[0m [43m        [49m[38;5;124;43m"[39;49m[38;5;124;43mx[39;49m[38;5;124;43m"[39;49m[43m,[49m[43m [49m[43mx[49m[43m,[49m[43m [49m[43my1[49m[43m,[49m[43m [49m[43my2[49m[43m,[49m
+[1;32m   5369[0m [43m        [49m[43mwhere[49m[38;5;241;43m=[39;49m[43mwhere[49m[43m,[49m[43m [49m[43minterpolate[49m[38;5;241;43m=[39;49m[43minterpolate[49m[43m,[49m[43m [49m[43mstep[49m[38;5;241;43m=[39;49m[43mstep[49m[43m,[49m[43m [49m[38;5;241;43m*[39;49m[38;5;241;43m*[39;49m[43mkwargs[49m[43m)[49m
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/matplotlib/axes/_axes.py:5272[0m, in [0;36mAxes._fill_between_x_or_y[0;34m(self, ind_dir, ind, dep1, dep2, where, interpolate, step, **kwargs)[0m
+[1;32m   5268[0m         kwargs[[38;5;124m"[39m[38;5;124mfacecolor[39m[38;5;124m"[39m] [38;5;241m=[39m \
+[1;32m   5269[0m             [38;5;28mself[39m[38;5;241m.[39m_get_patches_for_fill[38;5;241m.[39mget_next_color()
+[1;32m   5271[0m [38;5;66;03m# Handle united data, such as dates[39;00m
+[0;32m-> 5272[0m ind, dep1, dep2 [38;5;241m=[39m [38;5;28mmap[39m(
+[1;32m   5273[0m     ma[38;5;241m.[39mmasked_invalid, [38;5;28mself[39m[38;5;241m.[39m_process_unit_info(
+[1;32m   5274[0m         [(ind_dir, ind), (dep_dir, dep1), (dep_dir, dep2)], kwargs))
+[1;32m   5276[0m [38;5;28;01mfor[39;00m name, array [38;5;129;01min[39;00m [
+[1;32m   5277[0m         (ind_dir, ind), ([38;5;124mf[39m[38;5;124m"[39m[38;5;132;01m{[39;00mdep_dir[38;5;132;01m}[39;00m[38;5;124m1[39m[38;5;124m"[39m, dep1), ([38;5;124mf[39m[38;5;124m"[39m[38;5;132;01m{[39;00mdep_dir[38;5;132;01m}[39;00m[38;5;124m2[39m[38;5;124m"[39m, dep2)]:
+[1;32m   5278[0m     [38;5;28;01mif[39;00m array[38;5;241m.[39mndim [38;5;241m>[39m [38;5;241m1[39m:
+
+File [0;32m/fasterHome/anaconda3/envs/baseEmacs/lib/python3.11/site-packages/numpy/ma/core.py:2360[0m, in [0;36mmasked_invalid[0;34m(a, copy)[0m
+[1;32m   2333[0m [38;5;250m[39m[38;5;124;03m"""[39;00m
+[1;32m   2334[0m [38;5;124;03mMask an array where invalid values occur (NaNs or infs).[39;00m
+[1;32m   2335[0m
+[0;32m   (...)[0m
+[1;32m   2357[0m
+[1;32m   2358[0m [38;5;124;03m"""[39;00m
+[1;32m   2359[0m a [38;5;241m=[39m np[38;5;241m.[39marray(a, copy[38;5;241m=[39m[38;5;28;01mFalse[39;00m, subok[38;5;241m=[39m[38;5;28;01mTrue[39;00m)
+[0;32m-> 2360[0m res [38;5;241m=[39m masked_where([38;5;241m~[39m(np[38;5;241m.[39misfinite(a)), a, copy[38;5;241m=[39mcopy)
+[1;32m   2361[0m [38;5;66;03m# masked_invalid previously never returned nomask as a mask and doing so[39;00m
+[1;32m   2362[0m [38;5;66;03m# threw off matplotlib (gh-22842).  So use shrink=False:[39;00m
+[1;32m   2363[0m [38;5;28;01mif[39;00m res[38;5;241m.[39m_mask [38;5;129;01mis[39;00m nomask:
+
+[0;31mTypeError[0m: ufunc 'isfinite' not supported for the input types, and the inputs could not be safely coerced to any supported types according to the casting rule ''safe''
+#+end_example
+[[file:./.ob-jupyter/3cef5278869068995fad9af8360042443806fff4.png]]
+:END:
+
+#+begin_src jupyter-python :session *localhost*
+sns.relplot(data=frame, x='time', y='heart rate (bpm)', hue='subject', kind='line')
+#+end_src
