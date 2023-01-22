@@ -1,31 +1,8 @@
 #+title: Time Series Analysis
-* Rough things to test
-- [x] averages
-- correlations
-- [ ] spectrograms of some examples
-- [ ] means and standard deviations in the spectrograms
-- [ ] wavelet transform of each signal
-- [ ] cross-spectrum
-- [ ] varma, if these do look like stochastic models (vector autoregression (moving average + auto-regression))
-* Their Questions
-+ [ ] What is the distribution of physical activity levels between participants?
-+ [ ] How does the intensity of a physical activity differ between types of activities?
-+ [ ] How does the heart rate of the subjects vary over time during different activities?
-+ [ ] Can you find relationships between the acceleration data and the activity being performed?
-  - build a model that can distinguish running/not running?
-  - running v cycling
-  - predict the activity from the acceleration data
-+ Visualize the relationships
-+ Limitations
-+ other stuff
-* Pre-analysis thoughts on the data
-[[https://archive.ics.uci.edu/ml/datasets/PAMAP2+Physical+Activity+Monitoring][UCI description of the dataset]]
-- time
-- subject
-- activity
+* Pre-analysis thoughts on the data and its format
 - heart rate
   sampling rate is ~9Hz
-  on its own, this will give the rough stress of the activity; it wouldn't surprise me if even just averaging this could tell you what activity they're doing
+  On its own, this will give the rough stress of the activity; it wouldn't surprise me if even just averaging this could tell you what activity they're doing
 - imu: temp, acceleration at several resolutions, gyroscope, magnetometer, orientation, across several locations
   sampling frequency is 100Hz, so roughly 10x the heart rate data
   + chest
@@ -33,11 +10,10 @@
   + ankle
     proxy for gait, should be fairly high frequency, and useful for distinguishing several signal types
   + hand
-    I haven't thought enough about the domain to know for certain how this goes. Guessing it might actually be lower amplitude running than any of the walking
-There are 9 subjects, with only one female subject. Age is more consistent around 27.
+    I haven't thought enough about the domain to know for certain how this goes. Guessing it might actually be lower amplitude for running than any of the walking
+There are 9 subjects, with only one female subject, which is an unfortunate skew. Age is more consistent around 27.
 * Packages used
-Scipy has a signal processing toolbox, which will probably be useful in this context. Pandas is useful to manage the labels of the data I figure pywavelets may be useful, depending on how gnarly the signals are, and I recently learned about fCWT, so I wanted to test that out a bit.
-For classification we'll eventually want scikit-learn.
+Scipy has a signal processing toolbox, which will probably be useful in this context. Pandas is useful to manage the labels of the data and filtering. I figure pywavelets may be useful, depending on how gnarly the signals are, and I recently learned about fCWT, so I wanted to test that out a bit. For classification we'll eventually want scikit-learn. Seaborn supposedly has good plotting interactions with Pandas, so that's also going in here.
 #+begin_src jupyter-python :session *localhost*
 %matplotlib inline
 import pywt
@@ -68,7 +44,7 @@ In addition, I'm going to add a couple of variables: since the direction probabl
 #+begin_src jupyter-python :session *localhost*
 cols = ['time', 'activity', 'heart rate (bpm)', 'hand temperature', 'hand x', 'hand y', 'hand z', 'hand small x', 'hand small y', 'hand small z', 'hand gyro x',  'hand gyro y',  'hand gyro z',  'hand magne x',  'hand magne y',  'hand magne z', 'chest temperature', 'chest x', 'chest y', 'chest z', 'chest small x', 'chest small y', 'chest small z', 'chest gyro x',  'chest gyro y',  'chest gyro z',  'chest magne x',  'chest magne y',  'chest magne z', 'ankle temperature', 'ankle x', 'ankle y', 'ankle z', 'ankle small x', 'ankle small y', 'ankle small z', 'ankle gyro x',  'ankle gyro y',  'ankle gyro z',  'ankle magne x',  'ankle magne y',  'ankle magne z']
 def load_subject(subject_number, dataset):
-    """initial cleaning"""
+    """initial cleaning function"""
     raw = np.loadtxt(f"PAMAP2_Dataset/{dataset}/subject10{subject_number}.dat")
     # drop the orientation data (rows 16:20, 33:37, and 50:54), as they're invalid
     basic = raw[:,np.r_[:16, 20:33, 37:50]]
@@ -87,6 +63,8 @@ def load_subject(subject_number, dataset):
         if col_ii>2 and n_nans[col_ii] > .01:
             print(f"warning: more than 1% of the data for {cols[col_ii]} is NaNs")
     frame = pd.DataFrame(basic, columns = cols)
+
+    # generating the magnitude of the accelerometers; I found out that using frame.apply(np.norm(1)) performed absolutely abysmally, so doing it the manual way
     frame['hand'] = np.sqrt(np.square(frame[['hand x', 'hand y', 'hand z']]).sum(1))
     frame['chest'] = np.sqrt(np.square(frame[['chest x', 'chest y', 'chest z']]).sum(1))
     frame['ankle'] = np.sqrt(np.square(frame[['ankle x', 'ankle y', 'ankle z']]).sum(1))
@@ -136,7 +114,6 @@ frame, nans = full_table()
 thankfully, none of the non-heart rate variables have more than 1% ~NaN~, so we don't need to remove any of the data for now.
 
 #+begin_src jupyter-python :session *localhost*
-# frame['hand'] = frame[['hand x', 'hand y', 'hand z']].apply(np.linalg.norm,axis=1)
 frame
 #+end_src
 
@@ -220,6 +197,7 @@ summary_stats = frame.drop(['time', 'activity', 'coarse activity', 'coarse activ
 
 #+RESULTS:
 
+Here we have the averages per activity for heartrate. Running, rope jumping, and playing soccer are all outliers at 156 to 168, though they are also somewhat on the low end of number of samples. Interestingly, all categories are roughly within one standard deviation of one another, so heart rate alone will probably not be enough to distinguish fine-grained activities.
 #+begin_src jupyter-python :session *localhost*
 summary_stats['heart rate (bpm)'].sort_values(by='mean')
 #+end_src
@@ -270,7 +248,6 @@ playing soccer     180.000000  182.000000  191.107652
 #+end_example
 
 
-Here we have the averages per activity for heartrate. Running, rope jumping, and playing soccer are all outliers at 156 to 168, though they are also somewhat on the low end of number of samples. Interestingly, all categories are roughly within one standard deviation of one another, so heart rate alone will probably not be enough to distinguish fine-grained activities.
 
 Mostly out of curiosity, lets take a look at the temperature reading from the hand IMU:
 
@@ -323,7 +300,7 @@ car driving        34.6250  34.812500
 watching tv        35.3750  35.500000
 #+end_example
 
-For comparison, the [[https://en.wikipedia.org/wiki/Human_body_temperature][average human body temperature]] is 36.5–37.5 °C, so even the highest hand measurement is lower than one's core body temperature. Hand temperature roughly negatively correlate with activity; as you exercise, your body draws blood out of your periphery and into your core and muscles. Interestingly, the chest temperature, while generally closer to the actual core temperature, is still lower.
+For comparison, the [[https://en.wikipedia.org/wiki/Human_body_temperature][average human body temperature]] is 36.5–37.5 °C, so even the highest hand measurement is lower than one's core body temperature. Hand temperature roughly negatively correlate with activity; as you exercise, your body draws blood out of your periphery and into your core and muscles. Interestingly, the chest temperature, while generally closer to the actual core temperature, is still lower. Unsure if that's because I'm mistaken about the blood-flow, or if the sensor is still only getting a skin temperature reading.
 
 #+begin_src jupyter-python :session *localhost*
 summary_stats['chest temperature'].sort_values(by='mean')
@@ -478,7 +455,7 @@ running            13.292644  23.592293  219.854889
 #+end_example
 
 * Plotting utilities
-We begin by making a function that compresses selecting by activity and subject, since we'lll want to do that fairly frequently, and using that to plot a running heartrate vs a cycling one
+We begin by making a function that compresses selecting by activity and subject, since we'll want to do that fairly frequently, and using that to plot a running heartrate vs a cycling one
 #+begin_src jupyter-python :session *localhost*
 %matplotlib inline
 def subject_activity(subjectID, activity_name):
@@ -521,7 +498,7 @@ cycling: was performed outside with a real bike with slow to moderate pace, as i
 bike to work or bike for pleasure (but not as a sport activity)
 #+end_quote
 
-For a harder example, let's compare nordic walking and normal walking. It is clearly distinguishable for any given individual, but the person exerting the least during Nordic walking, and the person exerting the most during normal walking definitely overlap. I suspect some of the participants' have normal walking speeds that are quite aggressive, and others didn't treat nordic walking as a competitive sport.
+For a harder example, let's compare nordic walking and normal walking. It is clearly distinguishable for any given individual, but the person exerting the least during Nordic walking, and the person exerting the most during normal walking definitely overlap. I suspect some of the participants' have normal walking speeds that are quite aggressive, and others didn't treat nordic walking as a competitive sport (the description states that none of the subjects knew what it was beforehand).
 
 #+begin_src jupyter-python :session *localhost*
 plot_activity_comparison('normal walking', 'Nordic walking', 'heart rate (bpm)')
@@ -540,11 +517,11 @@ plt.plot(time, frame["hand"].loc[one_walking])
 
 #+RESULTS:
 :RESULTS:
-| <matplotlib.lines.Line2D | at | 0x7f2e5bca5410> |
+| <matplotlib.lines.Line2D | at | 0x7f2e40103610> |
 [[file:./.ob-jupyter/730dd4de75a25856bea741919e1acf272700f3b0.png]]
 :END:
 
-So let's switch over to using a fast wavelet transform, which lets us plot the magnitude of a signal at a given time and frequency in a way that works well for non-smooth functions. Here we compare walking and nordic walking for one individual. The mean heart rates are close, as are the average value of the accelerations. But the nordic walking clearly has much more high frequency activity. This is also reflected in the higher standard deviation across the entire set.
+So let's switch over to using a fast wavelet transform, which lets us plot the magnitude of a signal at a given time and frequency in a way that works well for non-smooth functions. Here we compare walking and nordic walking for one individual. The mean heart rates are close, as are the average value of the accelerations. But the nordic walking clearly has much more spiky high frequency activity. This is also reflected in the higher standard deviation across the entire set.
 #+begin_src jupyter-python :session *localhost*
 #plot cwt
 fs = 100 # the sampling frequency, rounded to the nearest integer
@@ -561,7 +538,7 @@ fcwt.plot(frame["hand"].loc[one_nordic].values, fs)
 :END:
 
 * Building a classifier
-So, to actually build a classifier, given that we have so few samples, we will need to choose some features. As a minimal model, lets use the average heart rate[fn:1] and the standard deviation of the magnitude of the acceleration of the hand IMU (the one plotted above).
+So, to actually build a classifier, given that we have so few samples, we will need to choose some features. As a minimal model, lets use the average heart rate and the standard deviation of the magnitude of the acceleration of the hand IMU (the one plotted above).
 First we need to create those variables
 #+begin_src jupyter-python :session *localhost*
 gb = frame.groupby(['activity label', 'subject'], sort='time')
@@ -613,20 +590,20 @@ frame[(frame['subject']==4) & (frame['activity label'] == 'running')]
 It appears subject 4 didn't really record running, so we will have to drop that example as we move on to the classifier
 
 #+begin_src jupyter-python :session *localhost*
-# aggregates.drop(('running', 4), axis=0,inplace=True)
-# aggregates.reset_index(inplace=True)
+aggregates.drop(('running', 4), axis=0,inplace=True)
+aggregates.reset_index(inplace=True)
 reg = linear_model.LogisticRegression(max_iter=10000)
 reg.fit(aggregates.drop(['activity label', 'subject'], axis=1).values, aggregates['activity label'].values)
 predictions = reg.predict(aggregates.drop(['activity label', 'subject'], axis=1).values)
 #+end_src
 
 #+RESULTS:
-: /tmp/ipykernel_297110/3622550160.py:4: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
+: /tmp/ipykernel_297110/3723468909.py:4: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
 :   reg.fit(aggregates.drop(['activity label', 'subject'], axis=1).values, aggregates['activity label'].values)
-: /tmp/ipykernel_297110/3622550160.py:5: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
+: /tmp/ipykernel_297110/3723468909.py:5: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
 :   predictions = reg.predict(aggregates.drop(['activity label', 'subject'], axis=1).values)
 
-So it trains; lets see how well it did (of course, given that this is without any sort of cross-validation, its use is somewhat questionable, but we have heavily constrained the model).
+So it trains; lets see how well it did (of course, given that this is without any sort of cross-validation, its use is somewhat questionable, but we have heavily constrained the model). Note that the confusion matrix doesn't have an equal number per class; the only example of car driving is misclassified as vacuuming.
 
 #+begin_src jupyter-python :session *localhost*
 conf_mat = sklearn.metrics.confusion_matrix(aggregates['activity label'].values, predictions)
@@ -654,6 +631,11 @@ plt.show()
 #+RESULTS:
 [[file:./.ob-jupyter/a912272f1a58d946c8ed835f9a3b6d406cca5214.png]]
 
-* Footnotes
+* Next steps
+Looking at more of the signals with a wavelet transform would probably be worthwhile, and would be best done by writing a custom plot to get them all in the same figure in some way.
+The model is ok, but there's obviously more variables to try with; ideally some sort of cross-validation scheme too, but having so few datapoints makes that somewhat difficult. Additionally, I noticed that not all of the activities are continuous, and I didn't have time to tease out the various sub-signals, which would get us more examples.
+I would also like to try with other kinds of transforms; for example, taking the mean frequency, or only the heart rate after a start-up period.
+Also, trying to predict based on the coarse labels would be worthwhile, though one can sort of see what would happen in the confusion matrix.
 
-[fn:1] ideally starting 1/3 of the way through the signal (skipping the warmup period), but I'm running short on time
+* Footnotes
+[fn:2] I ended up only using fcwt as a matter of time.
