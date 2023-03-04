@@ -1,0 +1,161 @@
+:PROPERTIES:
+:header-args: :session *animal10 :kernel kaggle
+:END:
+#+title: Description
+The goal of this project is to do some basic image classification and to build an interpretable model. For this case, we'll use a relatively obscure and small [[https://www.kaggle.com/datasets/alessiocorrado99/animals10][Kaggle animal dataset]] with 10 animals: dog, cat, horse, spider, butterfly, chicken, sheep, cow, squirrel, and elephant.
+Given that its of unknown quality, we'll first check to see if there's anything unusual about the images.
+First, we use Kaggle's api to get the dataset via =kaggle datasets download -d alessiocorrado99/animals10=. The file structure is in Italian, so for my ease at least I'm going to translate the folder names to English using their brief dictionary
+#+begin_src jupyter-python :session *animal10 :kernel kaggle
+import os
+working_data_dir = "/fasterHome/workingDataDir/kaggle/animals10"
+translate = {"cane": "dog", "cavallo": "horse", "elefante": "elephant", "farfalla": "butterfly", "gallina": "chicken", "gatto": "cat", "mucca": "cow", "pecora": "sheep", "scoiattolo": "squirrel", "ragno": "spider"}
+for folder in os.listdir(os.path.join(working_data_dir, "raw-img")):
+    contained = os.path.join(working_data_dir, "raw-img", folder)
+    if folder in translate:
+        os.rename(contained, os.path.join(working_data_dir, "raw-img", translate[folder]))
+#+end_src
+
+#+RESULTS:
+
+And one more essential piece of housekeeping: import statements
+#+begin_src jupyter-python
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.autograd as autograd
+import torch.nn.functional as nnF
+import torchvision as tv
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as tvFun
+from torch.utils.data import DataLoader
+from skimage import io, transform
+#+end_src
+
+#+RESULTS:
+
+That out of the way, lets define some functions so that batches are collated to the same size.
+#+begin_src jupyter-python
+batch_size = 5
+
+all_images = tv.datasets.ImageFolder(os.path.join(working_data_dir,"raw-img"), transform=tv.transforms.ToTensor())
+def needed_pad(x,max_size):
+    """pad `x` so that it's last two dimensions have size `max_size`"""
+    diff = np.array(max_size) - np.array(x.shape[-2:])
+    diff = diff/2
+    return nnF.pad(x, (int(np.floor(diff[1])), int(np.ceil(diff[1])), int(np.floor(diff[0])), int(np.ceil(diff[0]))))
+
+def collate_unevenly_sized(batch_iter):
+    images, labels = zip(*batch_iter)
+    max_size, _ = torch.max(torch.tensor([t.shape[-2:] for t in images]), dim=0)
+    images = torch.cat([needed_pad(x, max_size).unsqueeze(0) for x in images], dim=0)
+    return images, torch.tensor(labels)
+
+loader = DataLoader(all_images, shuffle=True, collate_fn=collate_unevenly_sized, batch_size=20)
+#+end_src
+
+#+RESULTS:
+
+
+
+Finally, lets take a look at some of the images:
+#+begin_src jupyter-python
+n_imgs = 25
+ncols=5
+plt.rcParams["savefig.bbox"] = 'tight'
+fig, axs = plt.subplots(ncols=ncols, nrows=n_imgs//ncols, squeeze=False)
+for ii, img in enumerate(loader):
+    axs[ii//ncols, ii%ncols].imshow(torch.permute(img[0][0,:].squeeze(), (1,2,0)))
+    axs[ii//ncols, ii%ncols].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+    if ii==n_imgs-1:
+        break
+#+end_src
+
+#+RESULTS:
+[[file:./.ob-jupyter/1cf22122a1760f585636f9d2d42723ea467ab4c8.png]]
+
+So we have a mix of pre-segmented images with a white background, more natural images with a background, and some cartoons. The variation in resolution is quite high, which could pose some difficulty; depending on how well or poorly the classifier does, we may want to upsample any particularly small images and perform more general ablations (translation, rotation, dilation etc). The subject is generally centered, generally takes up most of the image, and is frequently the only object present (except it appears horses).
+* Defining a simple convnet
+#+begin_src jupyter-python
+class MultiFilterLayer(nn.Module):
+    """Maintains the size, applying 3 filterbanks of different sizes, then do a batch norm, and finally a mixing filter (1x1 convolution) that also subsamples"""
+
+    def __init__(self, nchannels_in, nchannels_out, nonlin, norm_layer, filterSizes=(3,5,7), stride=2):
+        super(MultiFilterLayer, self).__init__()
+        self.norm = norm_layer(sum(nchannels_out[0:3]))
+        self.nonlin = nonlin
+        self.conv1 = nn.Conv2d(nchannels_in, nchannels_out[0], kernel_size=filterSizes[0], padding="same")
+        self.conv2 = nn.Conv2d(nchannels_in, nchannels_out[1], kernel_size=filterSizes[1], padding="same")
+        self.conv3 = nn.Conv2d(nchannels_in, nchannels_out[2], kernel_size=filterSizes[2], padding="same")
+        self.conv_next = nn.Conv2d(sum(nchannels_out[0:3]), nchannels_out[3], kernel_size=1, stride=stride)
+
+    def forward(self, x):
+        x = torch.cat((self.conv1(x), self.conv2(x), self.conv3(x)), dim=1)
+        x = self.norm(x)
+        x = self.nonlin(x)
+        x = self.conv_next(x)
+        return x
+
+class FullyConnected(nn.Module):
+    def __init__(self, nodes_per_layer, nonlin = None):
+        super(FullyConnected, self).__init__()
+        if nonlin is None:
+            nonlin = nn.ReLU6()
+        self.layers = [nn.Linear(nodes_per_layer[ii-1], node) for (ii,node) in enumerate(nodes_per_layer) if ii>0]
+        self.nonlin = nonlin
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+            x = self.nonlin(x)
+        return nnF.log_softmax(x, dim=1)
+
+class Animal10(nn.Module):
+    """nchannels_multifilters is the """
+    def __init__(self, nchannels_multifilters, nfully_connected, filterSizes, nonlin = None, norm_layer = None):
+        super(Animal10, self).__init__()
+        if nonlin is None:
+            nonlin = nn.ReLU()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self.firstLayer = MultiFilterLayer(3, nchannels_multifilters[0], nonlin, norm_layer, filterSizes[0])
+        self.secondLayer = MultiFilterLayer(nchannels_multifilters[0][-1], nchannels_multifilters[1], nonlin, norm_layer, filterSizes[0])
+
+    def forward(self, x):
+        x = self.firstLayer(x)
+        x = self.secondLayer(x)
+        x = torch.reshape(x, (x.size[0], slice())) # drop the spatial components
+        x = self.fullyConnected(x)
+        return x
+
+
+#animal_classifier = Animal10(([64,64,64,128], [128,128,128,256]), (256,5,10), ([3,5,7], [3,5,7]))
+for example_batch in loader:
+    break
+#animal_classifier.forward(example_batch[0]).shape
+multiFilterLayer = MultiFilterLayer(3,[64,64,64,192], nn.ReLU(), nn.BatchNorm2d)
+nn.BatchNorm2d
+device = torch.device("cuda")
+
+fc = FullyConnected((128,5,20), nn.ReLU())
+fc(torch.zeros((10, 128)))
+y = fc(torch.zeros((10, 128)))[0,0]
+autograd.backward(y)
+y
+#+end_src
+
+#+RESULTS:
+: tensor(-2.7966, grad_fn=<SelectBackward0>)
+
+#+begin_src jupyter-python
+multiFilterLayer = MultiFilterLayer(3,[64,64,64,192], nn.ReLU(), nn.BatchNorm2d)
+multiFilterLayer.to(device)
+multiFilterLayer(example_batch[0].to(device)).shape
+#+end_src
+
+#+RESULTS:
+: torch.Size([20, 192, 150, 150])
+
+* Training Said Convnet
+* Doing some transfer learning
+* Building an interpretable model
