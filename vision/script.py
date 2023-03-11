@@ -21,6 +21,7 @@ target_size = 800
 running_average_size = 100
 split_seed = 42
 test_split = 0.2
+n_epochs = 60
 
 working_data_dir = "/fasterHome/workingDataDir/kaggle/animals10"
 translate = {
@@ -220,26 +221,22 @@ class Animal10(nn.Module):
 n_channels = (
     [3],
     [16, 16, 16, 64],
-    [16, 16, 16, 64],
     [16, 16, 16, 128],
-    [32, 32, 32, 256],
+    [16, 16, 16, 256],
+    [32, 32, 32, 512],
 )
 filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
-fully_connected = (256, 256, 256, 10)
+fully_connected = (512, 512, 256, 128, 10)
 strides = [2, 4, 4, 4]
 animal_classifier = Animal10(n_channels, filterSizes, fully_connected, strides=strides)
 device = torch.device("cuda")
 animal_classifier.to(device)
-np.save(f"runs/nChannels{now}.npy", np.array(n_channels))
-np.save(f"runs/filterSizes{now}.npy", np.array(filterSizes))
-np.save(f"runs/fully_connected{now}.npy", np.array(fully_connected))
-np.save(f"runs/strides{now}.npy", np.array(strides))
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(animal_classifier.parameters(), lr=0.001, momentum=0.9)
 
 loss_record: list[float] = []
-for epoch in range(10 * 12):
+for epoch in range(n_epochs):
     running_loss = 0.0
     for ii, data in enumerate(train_loader):
         image_batch, labels = data
@@ -265,6 +262,10 @@ now = dt.datetime.now()
 loss_record = [x / running_average_size for x in loss_record]
 torch.save(animal_classifier.state_dict(), f"runs/model{now}.pth")
 np.save(f"runs/lossRecord{now}.npy", np.array(loss_record))
+np.save(f"runs/nChannels{now}.npy", np.array(n_channels))
+np.save(f"runs/filterSizes{now}.npy", np.array(filterSizes))
+np.save(f"runs/fully_connected{now}.npy", np.array(fully_connected))
+np.save(f"runs/strides{now}.npy", np.array(strides))
 
 
 # evaluating on the original data
@@ -300,11 +301,15 @@ print(correct_class)
 
 for data in train_loader:
     break
-plt.plot(loss_record)
+
+# plot a smoothed error
+from scipy.signal import savgol_filter
+
+plt.plot(np.array(range(len(loss_record))) / 41, savgol_filter(loss_record, 101, 3))
 plt.show()
 
-tmpAnimal = Animal10(
-    [[3], [16, 16, 16, 128]], filterSizes, fully_connected, strides=strides
-)
-tmpAnimal.load_state_dict(torch.load(f"runs/model{now}.pth"))
-thing = torch.load(f"runs/model{now}.pth")
+# tmpAnimal = Animal10(
+#     [[3], [16, 16, 16, 128]], filterSizes, fully_connected, strides=strides
+# )
+# tmpAnimal.load_state_dict(torch.load(f"runs/model{now}.pth"))
+# thing = torch.load(f"runs/model{now}.pth")

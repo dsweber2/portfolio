@@ -1,5 +1,9 @@
+:PROPERTIES:
+:header-args: :session *localhost*
+:END:
 #+title: Time Series Analysis
 * Pre-analysis thoughts on the data and its format
+The monitors are
 - heart rate
   sampling rate is ~9Hz
   On its own, this will give the rough stress of the activity; it wouldn't surprise me if even just averaging this could tell you what activity they're doing
@@ -14,7 +18,7 @@
 There are 9 subjects, with only one female subject, which is an unfortunate skew. Age is more consistent around 27.
 * Packages used
 Scipy has a signal processing toolbox, which will probably be useful in this context. Pandas is useful to manage the labels of the data and filtering. I figure pywavelets may be useful, depending on how gnarly the signals are, and I recently learned about fCWT, so I wanted to test that out a bit. For classification we'll eventually want scikit-learn. Seaborn supposedly has good plotting interactions with Pandas, so that's also going in here.
-#+begin_src jupyter-python :session *localhost*
+#+begin_src jupyter-python
 %matplotlib inline
 import pywt
 import fcwt
@@ -26,6 +30,7 @@ from scipy import interpolate
 import sklearn
 from sklearn import linear_model
 import pandas as pd
+pd.set_option("display.width", 250)
 #+end_src
 
 #+RESULTS:
@@ -43,7 +48,7 @@ Leaving it in as something to be explored however.
 In addition, I'm going to add a couple of variables: since the direction probably matters less than the total acceleration, ~chest~, ~hand~ and ~ankle~ give the magnitude of the vector ~('chest x', 'chest y', 'chest z')~. Similar stats for ~small~, ~gyro~, and ~magne~.
 #+begin_src jupyter-python :session *localhost*
 cols = ['time', 'activity', 'heart rate (bpm)', 'hand temperature', 'hand x', 'hand y', 'hand z', 'hand small x', 'hand small y', 'hand small z', 'hand gyro x',  'hand gyro y',  'hand gyro z',  'hand magne x',  'hand magne y',  'hand magne z', 'chest temperature', 'chest x', 'chest y', 'chest z', 'chest small x', 'chest small y', 'chest small z', 'chest gyro x',  'chest gyro y',  'chest gyro z',  'chest magne x',  'chest magne y',  'chest magne z', 'ankle temperature', 'ankle x', 'ankle y', 'ankle z', 'ankle small x', 'ankle small y', 'ankle small z', 'ankle gyro x',  'ankle gyro y',  'ankle gyro z',  'ankle magne x',  'ankle magne y',  'ankle magne z']
-def load_subject(subject_number, dataset):
+def load_subject(subject_number, dataset, previous_sessions):
     """initial cleaning function"""
     raw = np.loadtxt(f"PAMAP2_Dataset/{dataset}/subject10{subject_number}.dat")
     # drop the orientation data (rows 16:20, 33:37, and 50:54), as they're invalid
@@ -54,8 +59,8 @@ def load_subject(subject_number, dataset):
     # keep a record of where all the NaN's are, in case there are runs that are too large and we need to drop data
     nans = np.isnan(basic)
     n_nans = np.isnan(basic).sum(0)/n_samples
-    # do some interpolation using scipy to fill in the NaNs using neighboring points; using cubic splines, which is probably a little overkill.
-    for col_ii in range(2,basic.shape[1]):
+    # check that there aren't *too* many NaNs and do some interpolation using scipy to fill in the NaNs using neighboring points; using cubic splines, which is probably a little overkill.
+    for col_ii in range(2, basic.shape[1]):
         non_nan_times = basic[np.logical_not(nans[:,col_ii]), 0]
         non_nan = basic[np.logical_not(nans[:,col_ii]), col_ii]
         interpolator = interpolate.interp1d(non_nan_times, non_nan, kind="cubic", axis=0, fill_value='extrapolate')
@@ -63,48 +68,41 @@ def load_subject(subject_number, dataset):
         if col_ii>2 and n_nans[col_ii] > .01:
             print(f"warning: more than 1% of the data for {cols[col_ii]} is NaNs")
     frame = pd.DataFrame(basic, columns = cols)
-
-    # generating the magnitude of the accelerometers; I found out that using frame.apply(np.norm(1)) performed absolutely abysmally, so doing it the manual way
-    frame['hand'] = np.sqrt(np.square(frame[['hand x', 'hand y', 'hand z']]).sum(1))
-    frame['chest'] = np.sqrt(np.square(frame[['chest x', 'chest y', 'chest z']]).sum(1))
-    frame['ankle'] = np.sqrt(np.square(frame[['ankle x', 'ankle y', 'ankle z']]).sum(1))
-
-    frame['hand small'] = np.sqrt(np.square(frame[['hand small x', 'hand small y', 'hand small z']]).sum(1))
-    frame['chest small'] = np.sqrt(np.square(frame[['chest small x', 'chest small y', 'chest small z']]).sum(1))
-    frame['ankle small'] = np.sqrt(np.square(frame[['ankle small x', 'ankle small y', 'ankle small z']]).sum(1))
-
-    frame['hand gyro'] = np.sqrt(np.square(frame[['hand gyro x', 'hand gyro y', 'hand gyro z']]).sum(1))
-    frame['chest gyro'] = np.sqrt(np.square(frame[['chest gyro x', 'chest gyro y', 'chest gyro z']]).sum(1))
-    frame['ankle gyro'] = np.sqrt(np.square(frame[['ankle gyro x', 'ankle gyro y', 'ankle gyro z']]).sum(1))
-
-    frame['hand magne'] = np.sqrt(np.square(frame[['hand magne x', 'hand magne y', 'hand magne z']]).sum(1))
-    frame['chest magne'] = np.sqrt(np.square(frame[['chest magne x', 'chest magne y', 'chest magne z']]).sum(1))
-    frame['ankle magne'] = np.sqrt(np.square(frame[['ankle magne x', 'ankle magne y', 'ankle magne z']]).sum(1))
+    # generating the magnitude of the accelerometers; unfortunately frame.apply(np.norm(1)) is terrible, so doing it the manual way
+    for location in ["hand", "chest", "ankle"]:
+        for detector in ["", " small", " gyro", " magne"]:
+            frame[location + detector] = np.sqrt(np.square(frame[[f"{location}{detector} x", f"{location}{detector} y", f"{location}{detector} z"]])).sum(1)
+    delta = frame.activity.diff()
+    count = ((delta!=0) & (delta.notna())).expanding().sum()
+    frame["session"] = previous_sessions + count
     return frame, pd.DataFrame(n_nans[np.newaxis, :], columns = cols)
 def full_table():
     """create a data frame containing every subject and source; needs additional columns denoting the subject id and whether its the main examples or the optional ones"""
     full_frame = pd.DataFrame()
-    full_frame, full_nans = load_subject(1, "Protocol")
+    full_frame, full_nans = load_subject(1, "Protocol", 0)
     full_frame['subject'] = 1
     full_frame['Protocol'] = True
     full_nans['subject'] = 1
     full_nans['Protocol'] = True
     for subject_ii in range(2,10):
-        tmp_frame, tmp_nans = load_subject(subject_ii, "Protocol")
+        tmp_frame, tmp_nans = load_subject(subject_ii, "Protocol", 0)
         tmp_frame['subject'] = subject_ii
         tmp_frame['Protocol'] = True
         tmp_nans['subject'] = subject_ii
         tmp_nans['Protocol'] = True
         full_frame = pd.concat([full_frame, tmp_frame])
         full_nans = pd.concat([full_nans, tmp_nans])
+        full_frame = full_frame.reset_index(drop=True)
     for subject_ii in [1,5,6,8,9]:
-        tmp_frame, tmp_nans = load_subject(subject_ii, "Optional")
+        previous_sessions = full_frame.loc[full_frame["subject"] == subject_ii, "session"].max().item()
+        tmp_frame, tmp_nans = load_subject(subject_ii, "Optional", previous_sessions)
         tmp_frame['subject'] = subject_ii
         tmp_frame['Protocol'] = False
         tmp_nans['subject'] = subject_ii
         tmp_nans['Protocol'] = False
         full_frame = pd.concat([full_frame, tmp_frame])
         full_nans = pd.concat([full_nans, tmp_nans])
+        full_frame = full_frame.reset_index(drop=True)
     return full_frame, full_nans
 frame, nans = full_table()
 #+end_src
@@ -119,59 +117,33 @@ frame
 
 #+RESULTS:
 #+begin_example
-           time  activity  heart rate (bpm)  hand temperature   hand x  \
-0         37.66       1.0        100.106697            30.375  2.21530
-1         37.67       1.0        100.071815            30.375  2.29196
-2         37.68       1.0        100.042679            30.375  2.29090
-3         37.69       1.0        100.018877            30.375  2.21800
-4         37.70       1.0        100.000000            30.375  2.30106
-...         ...       ...               ...               ...      ...
-158868  1936.14      20.0        177.998621            24.875 -6.42779
-158869  1936.15      20.0        177.997952            24.875 -6.39107
-158870  1936.16      20.0        177.997164            24.875 -6.41763
-158871  1936.17      20.0        177.996250            24.875 -6.46049
-158872  1936.18      20.0        177.995202            24.875 -6.64998
+            time  activity  heart rate (bpm)  hand temperature   hand x   hand y   hand z  hand small x  hand small y  hand small z  ...  chest small  chest gyro  chest magne      ankle  ankle small  ankle gyro  ankle magne  session  subject  \
+0          37.66       1.0        100.106697            30.375  2.21530  8.27915  5.58753       2.24689       8.55387       5.77143  ...    11.327601    0.106019    95.567266  11.681316    11.664951    0.032374     156.3413      0.0        1
+1          37.67       1.0        100.071815            30.375  2.29196  7.67288  5.74467       2.27373       8.14592       5.78739  ...    11.342792    0.103489    94.955690  11.602804    11.589776    0.027834     155.5769      0.0        1
+2          37.68       1.0        100.042679            30.375  2.29090  7.14240  5.82342       2.26966       7.66268       5.78846  ...    11.328015    0.086358    95.202280  11.677533    11.695802    0.092696     154.7368      0.0        1
+3          37.69       1.0        100.018877            30.375  2.21800  7.14365  5.89930       2.22177       7.25535       5.88000  ...    11.388192    0.140770    94.135684  11.605225    11.680833    0.078307     155.7473      0.0        1
+4          37.70       1.0        100.000000            30.375  2.30106  7.25857  6.09259       2.20720       7.24042       5.95555  ...    11.402828    0.052941    94.096117  11.757375    11.695072    0.056557     155.2112      0.0        1
+...          ...       ...               ...               ...      ...      ...      ...           ...           ...           ...  ...          ...         ...          ...        ...          ...         ...          ...      ...      ...
+2724948  1936.14      20.0        177.998621            24.875 -6.42779  6.84232  2.80728      -6.52140       6.75658       2.56787  ...    13.978200    0.270753    78.999080  13.486086    12.975813    0.036802      84.8173      3.0        9
+2724949  1936.15      20.0        177.997952            24.875 -6.39107  6.69028  2.80834      -6.55066       6.75689       2.67360  ...    13.947740    0.215181    79.100340  12.962094    12.779916    0.076174      83.9056      3.0        9
+2724950  1936.16      20.0        177.997164            24.875 -6.41763  6.57977  3.15471      -6.53586       6.56061       2.84013  ...    13.917400    0.289798    77.973320  12.849478    12.583987    0.093631      85.1962      3.0        9
+2724951  1936.17      20.0        177.996250            24.875 -6.46049  6.42730  3.03912      -6.55081       6.53056       2.88551  ...    13.780850    0.277634    77.948380  12.887530    12.489858    0.055866      84.8443      3.0        9
+2724952  1936.18      20.0        177.995202            24.875 -6.64998  6.54224  2.99740      -6.59577       6.54600       2.90062  ...    13.720740    0.294427    78.464450  12.700753    12.372836    0.038863      84.2211      3.0        9
 
-         hand y   hand z  hand small x  hand small y  hand small z  ...  \
-0       8.27915  5.58753       2.24689       8.55387       5.77143  ...
-1       7.67288  5.74467       2.27373       8.14592       5.78739  ...
-2       7.14240  5.82342       2.26966       7.66268       5.78846  ...
-3       7.14365  5.89930       2.22177       7.25535       5.88000  ...
-4       7.25857  6.09259       2.20720       7.24042       5.95555  ...
-...         ...      ...           ...           ...           ...  ...
-158868  6.84232  2.80728      -6.52140       6.75658       2.56787  ...
-158869  6.69028  2.80834      -6.55066       6.75689       2.67360  ...
-158870  6.57977  3.15471      -6.53586       6.56061       2.84013  ...
-158871  6.42730  3.03912      -6.55081       6.53056       2.88551  ...
-158872  6.54224  2.99740      -6.59577       6.54600       2.90062  ...
+         Protocol
+0            True
+1            True
+2            True
+3            True
+4            True
+...           ...
+2724948     False
+2724949     False
+2724950     False
+2724951     False
+2724952     False
 
-        chest small  ankle small  hand gyro  chest gyro  ankle gyro  \
-0          9.822404     9.796073   0.039483    0.066375    0.027921
-1          9.852047     9.748582   0.173852    0.067424    0.021749
-2          9.873164     9.764360   0.238506    0.060338    0.063439
-3          9.865334     9.756044   0.194311    0.090952    0.046244
-4          9.817284     9.809110   0.072467    0.041521    0.049304
-...             ...          ...        ...         ...         ...
-158868     9.810042     9.867270   0.117788    0.161901    0.021327
-158869     9.760977     9.866938   0.110464    0.127745    0.055200
-158870     9.734297     9.857776   0.090651    0.172837    0.063669
-158871     9.577592     9.872424   0.085489    0.162392    0.038844
-158872     9.545330     9.805258   0.065467    0.182836    0.025506
-
-        hand magne  chest magne  ankle magne  subject  Protocol
-0        71.369737    67.332172    92.196177        1      True
-1        71.745163    66.692157    91.833822        1      True
-2        70.749974    67.164701    91.415884        1      True
-3        71.198631    66.494381    91.755312        1      True
-4        70.716057    66.439341    91.396062        1      True
-...            ...          ...          ...      ...       ...
-158868   54.975891    50.736188    51.023924        9     False
-158869   55.690979    50.253302    50.359110        9     False
-158870   54.701982    49.822665    51.166757        9     False
-158871   55.171737    49.673237    50.788652        9     False
-158872   55.628630    50.068217    50.618621        9     False
-
-[2724953 rows x 56 columns]
+[2724953 rows x 57 columns]
 #+end_example
 
 ** Extra labels
@@ -204,47 +176,26 @@ summary_stats['heart rate (bpm)'].sort_values(by='mean')
 
 #+RESULTS:
 #+begin_example
-                      count        mean        std         min         25%  \
+                      count        mean        std         min         25%         50%         75%         max
 activity label
-lying              192523.0   75.536043  10.536810   56.892348   69.995304
-computer work      309935.0   75.729955   8.315868   59.890326   69.000000
-sitting            185188.0   80.013060   8.008474   62.891149   75.000000
-watching tv         83646.0   83.407133   5.521208   74.892348   80.239726
-standing           189931.0   88.554788  10.010566   67.892312   80.999996
-ironing            238690.0   90.062311   8.929636   68.891149   84.998493
-folding laundry     99878.0   90.269954  11.506504   69.892256   78.000000
-house cleaning     187188.0   96.417751  13.479741   67.915654   87.000000
-car driving         54519.0  103.066983   7.304963   88.891073   98.383478
-vacuuming          175353.0  104.195473  13.512830   74.880503   95.000000
-normal walking     238761.0  112.786106   9.531551   85.891073  105.999997
-Nordic walking     188107.0  123.830869  10.980179   77.892344  117.996631
-cycling            164600.0  124.884293   8.609884   80.915657  119.010135
-descending stairs  104944.0  129.156950  22.952480   77.892339  109.005614
-ascending stairs   117216.0  129.529713  20.898364   70.891149  114.117585
-running             98199.0  156.595770  22.778271   80.892257  143.999045
-rope jumping        49360.0  161.986839  21.664445  120.891073  142.999861
-playing soccer      46915.0  168.780179  23.659120  104.877507  167.999181
-
-                          50%         75%         max
-activity label
-lying               73.995304   80.998869  115.107744
-computer work       73.006281   83.000000  102.107656
-sitting             78.999959   83.984519  113.107744
-watching tv         82.000000   84.005870  109.107661
-standing            88.612543   96.340207  112.107744
-ironing             88.905576   93.996939  122.107698
-folding laundry     91.984245   97.064489  117.107655
-house cleaning      94.000000  106.000590  128.107658
-car driving        102.000000  106.119340  128.122493
-vacuuming          101.000000  110.993210  140.122496
-normal walking     114.973125  120.028845  128.107659
-Nordic walking     124.978093  129.000000  147.135843
-cycling            124.999989  131.999518  144.107544
-descending stairs  129.000000  149.107659  175.107744
-ascending stairs   130.000000  146.239783  171.099443
-running            165.940556  172.000006  196.107652
-rope jumping       165.998933  179.000000  202.107688
-playing soccer     180.000000  182.000000  191.107652
+lying              192523.0   75.536043  10.536810   56.892348   69.995304   73.995304   80.998869  115.107744
+computer work      309935.0   75.729955   8.315868   59.890326   69.000000   73.006281   83.000000  102.107656
+sitting            185188.0   80.013060   8.008474   62.891149   75.000000   78.999959   83.984519  113.107744
+watching tv         83646.0   83.407133   5.521208   74.892348   80.239726   82.000000   84.005870  109.107661
+standing           189931.0   88.554788  10.010566   67.892312   80.999996   88.612543   96.340207  112.107744
+ironing            238690.0   90.062311   8.929636   68.891149   84.998493   88.905576   93.996939  122.107698
+folding laundry     99878.0   90.269954  11.506504   69.892256   78.000000   91.984245   97.064489  117.107655
+house cleaning     187188.0   96.417751  13.479741   67.915654   87.000000   94.000000  106.000590  128.107658
+car driving         54519.0  103.066983   7.304963   88.891073   98.383478  102.000000  106.119340  128.122493
+vacuuming          175353.0  104.195473  13.512830   74.880503   95.000000  101.000000  110.993210  140.122496
+normal walking     238761.0  112.786106   9.531551   85.891073  105.999997  114.973125  120.028845  128.107659
+Nordic walking     188107.0  123.830869  10.980179   77.892344  117.996631  124.978093  129.000000  147.135843
+cycling            164600.0  124.884293   8.609884   80.915657  119.010135  124.999989  131.999518  144.107544
+descending stairs  104944.0  129.156950  22.952480   77.892339  109.005614  129.000000  149.107659  175.107744
+ascending stairs   117216.0  129.529713  20.898364   70.891149  114.117585  130.000000  146.239783  171.099443
+running             98199.0  156.595770  22.778271   80.892257  143.999045  165.940556  172.000006  196.107652
+rope jumping        49360.0  161.986839  21.664445  120.891073  142.999861  165.998933  179.000000  202.107688
+playing soccer      46915.0  168.780179  23.659120  104.877507  167.999181  180.000000  182.000000  191.107652
 #+end_example
 
 
@@ -257,47 +208,26 @@ summary_stats['hand temperature'].sort_values(by='mean')
 
 #+RESULTS:
 #+begin_example
-                      count       mean       std        min      25%      50%  \
+                      count       mean       std        min      25%      50%      75%        max
 activity label
-playing soccer      46915.0  27.270159  2.779595  24.874921  25.0625  25.1875
-rope jumping        49360.0  29.720052  2.490725  24.875000  28.4375  30.1875
-running             98199.0  30.818058  2.086611  27.500000  28.8125  30.8125
-cycling            164600.0  31.008824  1.997441  27.562500  29.3125  31.0625
-Nordic walking     188107.0  31.534647  1.755120  28.937500  30.3125  30.7500
-computer work      309935.0  32.114982  1.214480  29.000000  31.2500  32.1250
-normal walking     238761.0  32.300379  1.382759  28.687500  31.3750  32.5625
-lying              192523.0  32.726154  1.405145  30.187500  31.3125  32.8750
-sitting            185188.0  33.262085  1.103127  31.500000  32.1250  33.5000
-descending stairs  104944.0  33.322055  0.886232  31.562500  32.4375  33.5625
-ascending stairs   117216.0  33.527258  0.876445  31.750000  32.5625  33.7500
-standing           189931.0  33.637791  0.856881  32.187500  33.0000  33.5625
-folding laundry     99878.0  33.666116  0.635729  32.937500  33.0625  33.8125
-ironing            238690.0  34.022834  0.773919  32.625000  33.4375  33.9375
-house cleaning     187188.0  34.024332  0.869849  32.562500  33.3125  33.7500
-vacuuming          175353.0  34.178360  0.652064  33.062500  33.6875  34.1250
-car driving         54519.0  34.484870  0.182332  34.125000  34.3125  34.4375
-watching tv         83646.0  35.197931  0.178430  34.875000  35.0625  35.1875
-
-                       75%        max
-activity label
-playing soccer     30.7500  30.812506
-rope jumping       30.8125  33.875001
-running            33.8125  33.875000
-cycling            32.7500  34.687500
-Nordic walking     33.0000  34.938604
-computer work      33.0000  34.500000
-normal walking     33.0625  34.875000
-lying              33.8125  34.937500
-sitting            34.2500  35.062500
-descending stairs  33.8750  34.875000
-ascending stairs   34.1250  35.125000
-standing           34.2500  35.250000
-folding laundry    34.5625  34.562500
-ironing            34.6875  35.500000
-house cleaning     34.7500  35.500000
-vacuuming          34.6250  35.500000
-car driving        34.6250  34.812500
-watching tv        35.3750  35.500000
+playing soccer      46915.0  27.270159  2.779595  24.874921  25.0625  25.1875  30.7500  30.812506
+rope jumping        49360.0  29.720052  2.490725  24.875000  28.4375  30.1875  30.8125  33.875001
+running             98199.0  30.818058  2.086611  27.500000  28.8125  30.8125  33.8125  33.875000
+cycling            164600.0  31.008824  1.997441  27.562500  29.3125  31.0625  32.7500  34.687500
+Nordic walking     188107.0  31.534647  1.755120  28.937500  30.3125  30.7500  33.0000  34.938604
+computer work      309935.0  32.114982  1.214480  29.000000  31.2500  32.1250  33.0000  34.500000
+normal walking     238761.0  32.300379  1.382759  28.687500  31.3750  32.5625  33.0625  34.875000
+lying              192523.0  32.726154  1.405145  30.187500  31.3125  32.8750  33.8125  34.937500
+sitting            185188.0  33.262085  1.103127  31.500000  32.1250  33.5000  34.2500  35.062500
+descending stairs  104944.0  33.322055  0.886232  31.562500  32.4375  33.5625  33.8750  34.875000
+ascending stairs   117216.0  33.527258  0.876445  31.750000  32.5625  33.7500  34.1250  35.125000
+standing           189931.0  33.637791  0.856881  32.187500  33.0000  33.5625  34.2500  35.250000
+folding laundry     99878.0  33.666116  0.635729  32.937500  33.0625  33.8125  34.5625  34.562500
+ironing            238690.0  34.022834  0.773919  32.625000  33.4375  33.9375  34.6875  35.500000
+house cleaning     187188.0  34.024332  0.869849  32.562500  33.3125  33.7500  34.7500  35.500000
+vacuuming          175353.0  34.178360  0.652064  33.062500  33.6875  34.1250  34.6250  35.500000
+car driving         54519.0  34.484870  0.182332  34.125000  34.3125  34.4375  34.6250  34.812500
+watching tv         83646.0  35.197931  0.178430  34.875000  35.0625  35.1875  35.3750  35.500000
 #+end_example
 
 For comparison, the [[https://en.wikipedia.org/wiki/Human_body_temperature][average human body temperature]] is 36.5–37.5 °C, so even the highest hand measurement is lower than one's core body temperature. Hand temperature roughly negatively correlate with activity; as you exercise, your body draws blood out of your periphery and into your core and muscles. Interestingly, the chest temperature, while generally closer to the actual core temperature, is still lower. Unsure if that's because I'm mistaken about the blood-flow, or if the sensor is still only getting a skin temperature reading.
@@ -308,47 +238,26 @@ summary_stats['chest temperature'].sort_values(by='mean')
 
 #+RESULTS:
 #+begin_example
-                      count       mean       std       min      25%      50%  \
+                      count       mean       std       min      25%      50%      75%        max
 activity label
-playing soccer      46915.0  33.212884  0.805097  32.31250  32.5625  32.6875
-rope jumping        49360.0  33.605086  1.472824  31.93750  32.1875  33.7500
-computer work      309935.0  33.845430  1.275583  31.12500  32.8750  33.8750
-running             98199.0  34.398012  1.428991  32.06250  33.3750  34.0625
-lying              192523.0  35.087787  1.560122  32.18750  33.6250  34.9375
-cycling            164600.0  35.725755  1.602098  32.81250  34.5000  35.3750
-sitting            185188.0  35.824338  1.255412  33.68750  34.7500  35.7500
-house cleaning     187188.0  36.037150  1.085068  33.93750  35.0625  36.0625
-Nordic walking     188107.0  36.158435  1.675612  33.74999  34.8125  35.6875
-standing           189931.0  36.165015  1.068752  34.31250  35.2500  35.9375
-car driving         54519.0  36.370270  0.149944  36.06250  36.2500  36.3750
-folding laundry     99878.0  36.459526  0.882027  34.75000  36.0625  36.9375
-ironing            238690.0  36.665357  0.927366  34.93750  36.0625  36.4375
-normal walking     238761.0  37.007254  0.827822  35.25000  36.4375  37.1250
-descending stairs  104944.0  37.022019  0.786143  35.43750  36.6875  36.7500
-ascending stairs   117216.0  37.054112  0.872753  35.18750  36.6875  36.8750
-vacuuming          175353.0  37.057773  0.891030  35.50000  36.5625  37.1875
-watching tv         83646.0  37.336685  0.194285  36.87500  37.1875  37.3750
-
-                       75%        max
-activity label
-playing soccer     34.2500  34.250000
-rope jumping       34.1250  36.500000
-computer work      34.8750  36.250000
-running            36.3750  36.812500
-lying              36.6875  37.437500
-cycling            37.3750  38.312500
-sitting            37.0000  37.625000
-house cleaning     37.1875  37.500000
-Nordic walking     38.3125  38.577874
-standing           37.4375  37.687500
-car driving        36.5000  36.625000
-folding laundry    37.2500  37.375000
-ironing            37.6250  38.125000
-normal walking     37.6250  38.437500
-descending stairs  37.8125  38.000000
-ascending stairs   37.8125  38.187500
-vacuuming          37.9375  38.250000
-watching tv        37.5000  37.562500
+playing soccer      46915.0  33.212884  0.805097  32.31250  32.5625  32.6875  34.2500  34.250000
+rope jumping        49360.0  33.605086  1.472824  31.93750  32.1875  33.7500  34.1250  36.500000
+computer work      309935.0  33.845430  1.275583  31.12500  32.8750  33.8750  34.8750  36.250000
+running             98199.0  34.398012  1.428991  32.06250  33.3750  34.0625  36.3750  36.812500
+lying              192523.0  35.087787  1.560122  32.18750  33.6250  34.9375  36.6875  37.437500
+cycling            164600.0  35.725755  1.602098  32.81250  34.5000  35.3750  37.3750  38.312500
+sitting            185188.0  35.824338  1.255412  33.68750  34.7500  35.7500  37.0000  37.625000
+house cleaning     187188.0  36.037150  1.085068  33.93750  35.0625  36.0625  37.1875  37.500000
+Nordic walking     188107.0  36.158435  1.675612  33.74999  34.8125  35.6875  38.3125  38.577874
+standing           189931.0  36.165015  1.068752  34.31250  35.2500  35.9375  37.4375  37.687500
+car driving         54519.0  36.370270  0.149944  36.06250  36.2500  36.3750  36.5000  36.625000
+folding laundry     99878.0  36.459526  0.882027  34.75000  36.0625  36.9375  37.2500  37.375000
+ironing            238690.0  36.665357  0.927366  34.93750  36.0625  36.4375  37.6250  38.125000
+normal walking     238761.0  37.007254  0.827822  35.25000  36.4375  37.1250  37.6250  38.437500
+descending stairs  104944.0  37.022019  0.786143  35.43750  36.6875  36.7500  37.8125  38.000000
+ascending stairs   117216.0  37.054112  0.872753  35.18750  36.6875  36.8750  37.8125  38.187500
+vacuuming          175353.0  37.057773  0.891030  35.50000  36.5625  37.1875  37.9375  38.250000
+watching tv         83646.0  37.336685  0.194285  36.87500  37.1875  37.3750  37.5000  37.562500
 #+end_example
 
 Turning to the acceleration data, first lets look at the movement of the core
@@ -358,47 +267,26 @@ summary_stats['chest'].sort_values(by='mean')
 
 #+RESULTS:
 #+begin_example
-                      count       mean        std       min       25%  \
+                      count       mean        std       min        25%        50%        75%         max
 activity label
-lying              192523.0   9.587474   0.293785  3.864523  9.460779
-watching tv         83646.0   9.715500   0.205635  7.434601  9.618258
-sitting            185188.0   9.819690   0.300539  5.138014  9.713096
-standing           189931.0   9.836934   0.269169  3.032830  9.721561
-computer work      309935.0   9.843228   0.255740  3.261755  9.690674
-ironing            238690.0   9.956556   0.326937  2.583077  9.789140
-car driving         54519.0   9.968828   0.448085  0.811480  9.754746
-folding laundry     99878.0   9.973617   0.461190  5.824929  9.736265
-house cleaning     187188.0  10.021077   0.918631  2.009884  9.658685
-normal walking     238761.0  10.112868   3.239062  1.779430  7.693999
-vacuuming          175353.0  10.134595   0.842794  4.386731  9.682469
-ascending stairs   117216.0  10.158468   3.432132  0.902167  8.107039
-descending stairs  104944.0  10.173882   4.853056  0.127578  7.352147
-cycling            164600.0  10.205396   1.597956  0.811480  9.310021
-Nordic walking     188107.0  10.219269   4.125512  0.450979  6.760642
-playing soccer      46915.0  11.481581   6.851165  0.318019  8.142076
-running             98199.0  11.924508   9.334042  0.102686  4.003827
-rope jumping        49360.0  13.045252  13.510043  0.061476  4.308789
-
-                         50%        75%         max
-activity label
-lying               9.567980   9.683376   22.425921
-watching tv         9.723783   9.812081   14.491353
-sitting             9.802401   9.902520   16.506993
-standing            9.815770   9.932196   18.610969
-computer work       9.819635  10.008822   19.007271
-ironing             9.941560  10.105507   16.804097
-car driving         9.933963  10.151250   15.466242
-folding laundry     9.927671  10.155044   15.642570
-house cleaning      9.929600  10.272134   54.126240
-normal walking     10.089537  12.463721   33.610029
-vacuuming          10.058788  10.519714   22.784502
-ascending stairs    9.832235  11.680017   40.177091
-descending stairs   9.762447  11.826813   50.926868
-cycling            10.103778  11.025641   34.329004
-Nordic walking     10.237648  13.329716   28.216694
-playing soccer      9.904972  12.869584  100.184404
-running             9.389884  19.580110   63.412393
-rope jumping        9.493158  14.780505  155.728100
+standing           189931.0  11.649961   1.196123  4.411650  10.830415  11.348566  12.032075   28.641700
+lying              192523.0  11.869738   1.208380  6.143860  11.061605  11.440874  12.347074   33.922240
+sitting            185188.0  12.113737   1.368664  6.978712  11.053744  11.985472  12.898430   26.390590
+folding laundry     99878.0  12.742850   1.601269  6.069636  11.425977  12.612441  13.876871   25.128310
+normal walking     238761.0  12.827018   4.526414  2.321289   9.337660  12.405097  16.337330   47.383509
+descending stairs  104944.0  12.904632   6.181492  0.173742   9.333757  11.966615  15.142292   56.465600
+watching tv         83646.0  13.047295   1.326296  9.517773  11.509389  13.533940  14.079912   23.435390
+car driving         54519.0  13.241978   1.155590  1.296195  12.546695  13.286060  13.956320   23.074470
+Nordic walking     188107.0  13.294585   5.789678  0.649803   8.434863  12.927320  17.755623   39.796090
+ironing            238690.0  13.316245   1.429476  3.445616  12.313830  13.328933  14.332534   27.614470
+house cleaning     187188.0  13.366189   2.109815  2.545821  11.785174  13.232926  14.667420   86.366400
+ascending stairs   117216.0  13.523735   4.767368  1.442701  10.404319  12.801235  16.247602   54.550430
+computer work      309935.0  13.656494   1.186366  5.195780  13.351371  13.977412  14.432106   25.508710
+cycling            164600.0  14.454417   2.548747  1.296195  12.840340  14.358816  15.877822   46.944720
+vacuuming          175353.0  14.712883   2.116881  4.804485  13.247810  14.737060  16.194550   35.498230
+running             98199.0  16.183045  12.414135  0.174144   5.994145  11.778090  24.983095   90.997040
+playing soccer      46915.0  16.191279  10.475450  0.481144  10.728291  13.398264  18.345196  166.722100
+rope jumping        49360.0  17.387292  17.702820  0.102712   6.099263  11.760797  19.590306  193.343900
 #+end_example
 
 One thing to notice is that the highest mean value activities also have the largest standard deviation, and even lying down has a max value that is higher than the typical mean. This is data that the average value obscures the important time variation.
@@ -411,47 +299,26 @@ summary_stats['hand'].sort_values(by='mean')
 
 #+RESULTS:
 #+begin_example
-                      count       mean        std       min       25%  \
+                      count       mean        std       min        25%        50%        75%        max
 activity label
-computer work      309935.0   9.727158   0.501489  2.994510  9.597124
-lying              192523.0   9.728174   0.536339  2.365078  9.622836
-sitting            185188.0   9.760337   0.786686  1.056083  9.641148
-watching tv         83646.0   9.781914   0.329989  2.083712  9.717247
-standing           189931.0   9.783620   0.741341  0.671031  9.643139
-car driving         54519.0   9.924075   1.387874  1.364018  9.480332
-ironing            238690.0  10.018180   1.605587  0.569730  9.374962
-folding laundry     99878.0  10.287894   2.607382  0.599666  8.991917
-descending stairs  104944.0  10.341806   3.795485  0.280840  8.118465
-ascending stairs   117216.0  10.669996   3.750168  0.201597  8.499087
-cycling            164600.0  10.677710   3.175584  0.599503  9.003170
-vacuuming          175353.0  10.763059   2.838379  0.483494  9.280254
-house cleaning     187188.0  10.943465   4.123770  0.128068  9.301632
-Nordic walking     188107.0  11.000437   7.575883  0.143968  7.232741
-normal walking     238761.0  11.263885   3.056225  0.418703  9.076369
-rope jumping        49360.0  13.761209   8.115749  0.167896  8.341781
-playing soccer      46915.0  15.700402  10.978987  0.188406  9.710148
-running             98199.0  20.107068  17.237363  1.309860  9.846719
-
-                         50%        75%         max
-activity label
-computer work       9.703476   9.816248   53.464097
-lying               9.704683   9.790422   59.326403
-sitting             9.734970   9.828852  152.245999
-watching tv         9.776557   9.833766   24.270579
-standing            9.747043   9.853661   50.794843
-car driving         9.771636  10.143078   67.691678
-ironing             9.839169  10.459946   50.921455
-folding laundry     9.942293  11.181271   66.033619
-descending stairs   9.780045  11.855787  150.270548
-ascending stairs    9.980181  12.461935   65.658334
-cycling            10.164226  11.776928  119.402960
-vacuuming          10.358288  11.928911   72.013851
-house cleaning     10.024941  11.341324  120.355979
-Nordic walking      9.611720  13.655715  162.544252
-normal walking     11.058614  13.259273   52.659602
-rope jumping       11.480566  18.117702  174.379059
-playing soccer     11.824167  17.686872  266.710376
-running            13.292644  23.592293  219.854889
+watching tv         83646.0  12.976334   1.344770  3.467512  11.584701  13.416440  13.829150   34.65280
+computer work      309935.0  13.499854   2.149371  4.085922  11.832344  13.522483  15.358295   82.28410
+sitting            185188.0  14.299691   1.679883  1.640518  13.414902  14.313923  15.363480  257.57250
+standing           189931.0  14.332135   1.600721  0.958607  13.449949  14.163058  15.174375   84.25390
+lying              192523.0  14.621337   1.337046  3.896166  13.658908  14.463660  15.527490   91.76120
+descending stairs  104944.0  15.173719   5.517418  0.399008  11.835050  14.460350  17.536492  201.54536
+ascending stairs   117216.0  15.307258   5.226040  0.319596  12.136278  14.648471  17.724972  106.24250
+car driving         54519.0  15.324900   2.286437  1.924662  14.388040  15.176870  15.964480  113.78690
+ironing            238690.0  15.348046   2.838818  0.822036  13.758824  15.250174  16.635517   75.55300
+normal walking     238761.0  15.605364   4.545390  0.705985  12.322040  15.248410  18.582470   90.09960
+folding laundry     99878.0  15.607078   4.237963  0.792277  13.263352  15.248550  17.280442  112.84720
+vacuuming          175353.0  16.027481   4.361233  0.612444  13.523860  15.560370  18.024730  105.31059
+house cleaning     187188.0  16.154815   6.508211  0.195595  13.055171  14.910062  17.207385  147.81357
+Nordic walking     188107.0  16.202592  10.524498  0.179594  10.338574  14.125360  20.618385  226.58520
+cycling            164600.0  16.381923   5.134468  0.959435  13.500376  15.723766  18.356143  172.28180
+rope jumping        49360.0  20.555868  12.300324  0.282541  12.226953  17.090891  27.232732  262.40430
+playing soccer      46915.0  22.455948  16.727917  0.323807  12.934570  16.673310  25.226590  461.80400
+running             98199.0  28.684275  25.247101  2.128081  13.822605  19.105880  33.675370  355.49420
 #+end_example
 
 * Plotting utilities
@@ -467,22 +334,31 @@ def plot_activity_comparison(activity_name_1, activity_name_2, sensor):
         select_two = subject_activity(subject,activity_name_2)
         time = frame['time'].loc[select_one]
         start_time = time.min()
-        plt.plot(time -start_time, frame[sensor].loc[select_one], label=f"{subject} {activity_name_1}", color="red")
+        if subject ==0:
+            label1 = f"{activity_name_1}"
+            label2 = f"{activity_name_2}"
+        else:
+            label1 = ""
+            label2 = ""
+        plt.plot(time -start_time, frame[sensor].loc[select_one], label=label1, color="red")
         time = frame['time'].loc[select_two]
         start_time = time.min()
-        plt.plot(time - start_time, frame[sensor].loc[select_two], label=f"{subject} {activity_name_2}", color="blue")
-        plt.legend(fontsize='xx-small')
+        plt.plot(time - start_time, frame[sensor].loc[select_two], label=label2, color="blue")
+    plt.legend(fontsize='x-small')
+    plt.title(f"{activity_name_1} vs {activity_name_2}, {sensor}")
+    plt.xlabel = "Time (s)"
 #+end_src
 
 #+RESULTS:
 * Pairwise time series comparisons
 First, lets compare walking and running using the heartrate, we see that the two are visually obvious, as was reflected in the mean value above.
+
 #+begin_src jupyter-python :session *localhost*
 plot_activity_comparison('normal walking', 'running', 'heart rate (bpm)')
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/b49f349d8e0bd3edeaaf1dea1c9e034fe18c986d.png]]
+[[file:./.ob-jupyter/13c5ffba7ec77669c1a2cd5e6b06e51d054399e3.png]]
 
 A somewhat harder example would be running vs cycling, which has a mean difference of ~25bpm. Below, once the initial starting period is over, the two series cleanly separate.
 
@@ -491,7 +367,7 @@ plot_activity_comparison('cycling', 'running', 'heart rate (bpm)')
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/590ad898d25d9f0578912ee7f1de18f19ad3f21e.png]]
+[[file:./.ob-jupyter/5e10b93e6aeb55e66217b640a31dc26caf138bfa.png]]
 If it were competitive rather than practical cycling, I suspect this gap would be much smaller; the description from the data set is
 #+begin_quote
 cycling: was performed outside with a real bike with slow to moderate pace, as if the subject would
@@ -505,7 +381,7 @@ plot_activity_comparison('normal walking', 'Nordic walking', 'heart rate (bpm)')
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/3944988389c543a2e159ba1104b523fbf216d9f0.png]]
+[[file:./.ob-jupyter/893e99c5e8086099304fb3fccbaf6adcc937483b.png]]
 
 Moving on to the IMU, we get signals that are fairly impenetrable in the time domain:
 #+begin_src jupyter-python :session *localhost*
@@ -517,53 +393,60 @@ plt.plot(time, frame["hand"].loc[one_walking])
 
 #+RESULTS:
 :RESULTS:
-| <matplotlib.lines.Line2D | at | 0x7f2e40103610> |
-[[file:./.ob-jupyter/730dd4de75a25856bea741919e1acf272700f3b0.png]]
+| <matplotlib.lines.Line2D | at | 0x7f33397c6810> |
+[[file:./.ob-jupyter/b9f1f9a1868292aec375c46bafbdf8ae223ae681.png]]
 :END:
 
 So let's switch over to using a fast wavelet transform, which lets us plot the magnitude of a signal at a given time and frequency in a way that works well for non-smooth functions. Here we compare walking and nordic walking for one individual. The mean heart rates are close, as are the average value of the accelerations. But the nordic walking clearly has much more spiky high frequency activity. This is also reflected in the higher standard deviation across the entire set.
 #+begin_src jupyter-python :session *localhost*
-#plot cwt
 fs = 100 # the sampling frequency, rounded to the nearest integer
+signal = frame["hand"].loc[one_walking].values
+title = "hand signal, walking"
+def plot_cwt(signal, title):
+    f0 = 1/(signal.size/fs)
+    f1 = fs/2
+    fn = 100
 
-fcwt.plot(frame["hand"].loc[one_walking].values, fs)
+    freqs, output = fcwt.cwt(signal, fs, f0, f1, fn)
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+    ax1.plot(signal)
+    ax1.set_title(title)
+    ax2.imshow(np.abs(output),aspect='auto')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Frequency (Hz)')
+    ax2.set_title('CWT')
+    ax2.set_xticks(np.arange(0,signal.size,fs*10),np.arange(0,signal.size/fs,10))
+    plt.setp(ax2.get_xticklabels(),rotation=45, ha="right", rotation_mode="anchor")
+    ax2.set_yticks(np.arange(0,fn,fn/10),np.round(freqs[::int(fn/10)]))
+    plt.show()
+plot_cwt(signal, title)
 one_nordic = subject_activity(1,'Nordic walking')
-fcwt.plot(frame["hand"].loc[one_nordic].values, fs)
+plot_cwt(frame["hand"].loc[one_nordic].values, "hand signal, Nordic walking")
 #+end_src
 
 #+RESULTS:
 :RESULTS:
-[[file:./.ob-jupyter/ac3d77d574bf690ab7201a10a94c563cb8775aac.png]]
-[[file:./.ob-jupyter/cddf6cec902fa7e3ff1c55526866a7e2a8707c58.png]]
+[[file:./.ob-jupyter/cd8b70057655b379d8266c5b36c4a5ae739cab68.png]]
+[[file:./.ob-jupyter/e2f066b1841d610f5a12363242ed5c7d307b862d.png]]
 :END:
 
-* Building a classifier
+* Building a simple per-session classifier
 So, to actually build a classifier, given that we have so few samples, we will need to choose some features. As a minimal model, lets use the average heart rate and the standard deviation of the magnitude of the acceleration of the hand IMU (the one plotted above).
 First we need to create those variables
 #+begin_src jupyter-python :session *localhost*
-gb = frame.groupby(['activity label', 'subject'], sort='time')
+gb = frame.groupby(['activity label', 'subject', "session"], sort='time')
 aggregates = gb[['heart rate (bpm)', 'hand', 'ankle', 'chest']].aggregate([np.mean, np.std])
 aggregates[np.isnan(aggregates).values]
 #+end_src
 
 #+RESULTS:
-#+begin_example
-                       heart rate (bpm)          hand         ankle      \
-                                   mean std      mean std      mean std
-activity label subject
-running        4             130.999962 NaN  9.907499 NaN  9.983255 NaN
-               4             130.999962 NaN  9.907499 NaN  9.983255 NaN
-               4             130.999962 NaN  9.907499 NaN  9.983255 NaN
-               4             130.999962 NaN  9.907499 NaN  9.983255 NaN
-
-                           chest
-                            mean std
-activity label subject
-running        4        9.846785 NaN
-               4        9.846785 NaN
-               4        9.846785 NaN
-               4        9.846785 NaN
-#+end_example
+:                                heart rate (bpm)          hand          ankle          chest
+:                                            mean std      mean std       mean std       mean std
+: activity label subject session
+: running        4       12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                        12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                        12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                        12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
 
 We have a little detour to figure out why the standard deviation for subject 4 is a NaN.
 #+begin_src jupyter-python :session *localhost*
@@ -571,39 +454,30 @@ frame[(frame['subject']==4) & (frame['activity label'] == 'running')]
 #+end_src
 
 #+RESULTS:
-#+begin_example
-           time  activity  heart rate (bpm)  hand temperature   hand x  \
-231420  3301.46       5.0        130.999962              27.5 -4.61858
-
-         hand y  hand z  hand small x  hand small y  hand small z  ...  \
-231420  6.44599 -5.9394       -4.5911       6.38731      -5.98033  ...
-
-        chest gyro  ankle gyro  hand magne  chest magne  ankle magne  subject  \
-231420    0.053439    0.015859    27.59614    25.645654    50.264433        4
-
-        Protocol  activity label  coarse activity  coarse activity label
-231420      True         running                2               exercise
-
-[1 rows x 59 columns]
-#+end_example
+:            time  activity  heart rate (bpm)  hand temperature   hand x   hand y  hand z  hand small x  hand small y  hand small z  ...      ankle  ankle small  ankle gyro  ankle magne  session  subject  Protocol  activity label  coarse activity  \
+: 919064  3301.46       5.0        130.999962              27.5 -4.61858  6.44599 -5.9394       -4.5911       6.38731      -5.98033  ...  12.943927     12.81504    0.017265     58.45217     12.0        4      True         running                2
+:
+:         coarse activity label
+: 919064               exercise
+:
+: [1 rows x 60 columns]
 
 It appears subject 4 didn't really record running, so we will have to drop that example as we move on to the classifier
 
 #+begin_src jupyter-python :session *localhost*
-aggregates.drop(('running', 4), axis=0,inplace=True)
-aggregates.reset_index(inplace=True)
+ # aggregates.drop(('running', 4), axis=0,inplace=True)
+ # aggregates.reset_index(inplace=True)
+input = aggregates.drop(['activity label', 'subject', "session"], axis=1)
 reg = linear_model.LogisticRegression(max_iter=10000)
-reg.fit(aggregates.drop(['activity label', 'subject'], axis=1).values, aggregates['activity label'].values)
-predictions = reg.predict(aggregates.drop(['activity label', 'subject'], axis=1).values)
+reg.fit(input.values, aggregates.loc[:, "activity label"].values)
+predictions = reg.predict(input.values)
 #+end_src
 
 #+RESULTS:
-: /tmp/ipykernel_297110/3723468909.py:4: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
-:   reg.fit(aggregates.drop(['activity label', 'subject'], axis=1).values, aggregates['activity label'].values)
-: /tmp/ipykernel_297110/3723468909.py:5: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
-:   predictions = reg.predict(aggregates.drop(['activity label', 'subject'], axis=1).values)
+: /tmp/ipykernel_3223968/2649176293.py:3: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
+:   input = aggregates.drop(['activity label', 'subject', "session"], axis=1)
 
-So it trains; lets see how well it did (of course, given that this is without any sort of cross-validation, its use is somewhat questionable, but we have heavily constrained the model). Note that the confusion matrix doesn't have an equal number per class; the only example of car driving is misclassified as vacuuming.
+So it trains; lets see how well it did (of course, given that this is without any sort of cross-validation, its use is questionable). Note that the confusion matrix doesn't have an equal number per class; car driving only has one example in the first place.
 
 #+begin_src jupyter-python :session *localhost*
 conf_mat = sklearn.metrics.confusion_matrix(aggregates['activity label'].values, predictions)
@@ -611,31 +485,167 @@ ax = sns.heatmap(conf_mat, annot=True, fmt='d')
 ax.set_ylabel("Actual Class", fontsize=14, labelpad=20)
 ax.yaxis.set_ticklabels(reg.classes_, rotation=0)
 ax.set_xlabel("Predicted Class", fontsize=14, labelpad=20)
-ax.xaxis.set_ticklabels(reg.classes_, rotation=90)
+ax.xaxis.set_ticklabels(reg.classes_, rotation=45, ha="right", rotation_mode="anchor")
+print(f"Overall accuracy: {conf_mat.trace()/conf_mat.sum()}")
 plt.show()
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/d262bcf4ed1c22fe7bc064e16d50302eebb9b10f.png]]
-
-So the sedentary activities tend to get confused by this model, while house cleaning and vacuuming get confused. Any of the particularly active activities is easily separated from the rest. The resulting coefficients that got us here are in the heatmap below.
+:RESULTS:
+: Overall accuracy: 0.9193548387096774
+[[file:./.ob-jupyter/5f6e223b2e5a475fc1c9f527c5a6963f4b5f5ecc.png]]
+:END:
+So on the training set, the model has an overall accuracy of ~92%, which is doubtless higher than the actual accuracy. However, doing cross-validation with so few examples per class is somewhat fraught, so we will do that on the course labels.
+Briefly, the resulting coefficients that got us this classification are in the heatmap below.
 #+begin_src jupyter-python :session *localhost*
 ax = sns.heatmap(reg.coef_, annot=True)
 ax.set_ylabel("classes", fontsize=14, labelpad=20)
 ax.yaxis.set_ticklabels(reg.classes_, rotation=0)
 ax.set_xlabel("variables", fontsize=14, labelpad=20)
-ax.xaxis.set_ticklabels(list(aggregates)[2:], rotation=90)
+ax.xaxis.set_ticklabels(list(aggregates)[3:], rotation=45, ha="right", rotation_mode="anchor")
 plt.show()
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/a912272f1a58d946c8ed835f9a3b6d406cca5214.png]]
+[[file:./.ob-jupyter/0d1d8825defdc3d4b77e41d203e04250e63b0a77.png]]
+the white variables tells us ones that correlate, while the black entries tell us variables that anti-correlate with the activity. Lying down, for example, has relatively still hands (-1 on the standard deviation of hands), while folding laundry has rapidly moving hands.
+** Per-Session coarse labels
+In a very similar manner, lets see what happens to the classificaiton if we use coarser labels
+#+begin_src jupyter-python
+gb = frame.groupby(['coarse activity label', 'subject', "session"], sort='time')
+aggregates = gb[['heart rate (bpm)', 'hand', 'ankle', 'chest']].aggregate([np.mean, np.std])
+aggregates#
+aggregates[np.isnan(aggregates).values]
+#+end_src
+
+#+RESULTS:
+:                                       heart rate (bpm)          hand          ankle          chest
+:                                                   mean std      mean std       mean std       mean std
+: coarse activity label subject session
+: exercise              4       12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                               12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                               12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+:                               12.0          130.999962 NaN  17.00397 NaN  12.943927 NaN  11.315007 NaN
+
+#+begin_src jupyter-python
+# aggregates.drop(('exercise', 4), axis=0,inplace=True)
+# aggregates = aggregates.reset_index()
+input = aggregates.drop(['coarse activity label', 'subject', "session"], axis=1)
+group = aggregates.session
+reg = linear_model.LogisticRegression(max_iter=10000)
+reg.fit(input.values, aggregates.loc[:, "coarse activity label"].values)
+predictions = reg.predict(input.values)
+conf_mat = sklearn.metrics.confusion_matrix(aggregates['coarse activity label'].values, predictions)
+ax = sns.heatmap(conf_mat, annot=True, fmt='d')
+ax.set_ylabel("Actual Class", fontsize=14, labelpad=20)
+ax.yaxis.set_ticklabels(reg.classes_, rotation=0)
+ax.set_xlabel("Predicted Class", fontsize=14, labelpad=20)
+ax.xaxis.set_ticklabels(reg.classes_, rotation=45, ha="right", rotation_mode="anchor")
+plt.show()
+print(f"Overall accuracy: {conf_mat.trace()/conf_mat.sum()}")
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: /tmp/ipykernel_3223968/2081343019.py:3: PerformanceWarning: dropping on a non-lexsorted multi-index without a level parameter may impact performance.
+:   input = aggregates.drop(['coarse activity label', 'subject', "session"], axis=1)
+[[file:./.ob-jupyter/7ef30a1d88f6733a5576f4be363a9be0708c77c1.png]]
+: Overall accuracy: 0.940677966101695
+:END:
+So the overall accuracy is up a little bit, though there is some overlap between active and exercise. Since we have more examples, we can leave out a test set (25% or 30 examples) and do 5 fold cross-validation and expect somewhat reasonable results. Given the imbalance of the classes, we should stratify on the labels in both cases. When we start doing more complicated models, it may become important to do grouping as well, to avoid any particular features of a given participant.
+#+begin_src jupyter-python
+from sklearn.model_selection import cross_validate
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV
+X_train, X_test, y_train, y_test = train_test_split(input.values, aggregates.loc[:, "coarse activity label"].values, stratify=aggregates.loc[:, "coarse activity label"].values, test_size=.25)
+reg = linear_model.LogisticRegression(max_iter=10000,penalty='elasticnet',  l1_ratio=0.1, solver="saga")
+fitting_parameters = {"C" : np.logspace(-6,2,5), "l1_ratio" : np.logspace(-6,0,5)}
+grid_fitter = GridSearchCV(reg, fitting_parameters, scoring = "roc_auc_ovr", n_jobs=10)
+grid_fitter.fit(X_train, y_train)
+#+end_src
+
+#+RESULTS:
+: GridSearchCV(estimator=LogisticRegression(l1_ratio=0.1, max_iter=10000,
+:                                           penalty='elasticnet', solver='saga'),
+:              n_jobs=10,
+:              param_grid={'C': array([1.e-06, 1.e-04, 1.e-02, 1.e+00, 1.e+02]),
+:                          'l1_ratio': array([1.00000000e-06, 3.16227766e-05, 1.00000000e-03, 3.16227766e-02,
+:        1.00000000e+00])},
+:              scoring='roc_auc_ovr')
+
+
+#+begin_src jupyter-python
+df = pd.DataFrame(grid_fitter.cv_results_)
+ax = sns.heatmap(df.pivot(index="param_C", columns="param_l1_ratio", values="mean_test_score"))
+plt.setp(ax.get_xticklabels(),rotation=45, ha="right", rotation_mode="anchor")
+ax.set_xticklabels(["{:,.2f}".format(x) for x in ax.get_xticks()])
+best_mean_ii = df.mean_test_score.idxmax()
+print(df.mean_test_score[best_mean_ii], (df.param_C[best_mean_ii], df.param_l1_ratio[best_mean_ii]))
+ax
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: 0.9838667299778411 (1.0, 1.0)
+: /tmp/ipykernel_3223968/1578799489.py:2: FutureWarning: In a future version, the Index constructor will not infer numeric dtypes when passed object-dtype sequences (matching Series behavior)
+:   ax = sns.heatmap(df.pivot(index="param_C", columns="param_l1_ratio", values="mean_test_score"))
+: /tmp/ipykernel_3223968/1578799489.py:2: FutureWarning: In a future version, the Index constructor will not infer numeric dtypes when passed object-dtype sequences (matching Series behavior)
+:   ax = sns.heatmap(df.pivot(index="param_C", columns="param_l1_ratio", values="mean_test_score"))
+: <AxesSubplot: xlabel='param_l1_ratio', ylabel='param_C'>
+[[file:./.ob-jupyter/764e6e4366fa8b6777c49ab3b7c47b0f0837bbf8.png]]
+:END:
+
+The scores here are the area under the curve of the ROC curve, based on classifying one versus the rest, which is insensitive to the class imbalance. So the model with the best mean AUC across folds has an AUC of ~0.984. This model has parameters $C=1.0$ and $\ell_1\textrm{-ratio}=1.0$, so it is a relatively lax $\ell_1$ penalty. The test AUC for this model:
+#+begin_src jupyter-python
+grid_fitter.score(X_test, y_test)
+#+end_src
+
+#+RESULTS:
+: 0.9415584415584415
+
+So as expected, the training fit is a little too rosy, and the AUC on the test set is ~0.94. To see how this breaks down by class:
+
+#+begin_src jupyter-python
+predictions = grid_fitter.predict(X_test)
+conf_mat = sklearn.metrics.confusion_matrix(y_test, predictions)
+ax = sns.heatmap(conf_mat, annot=True, fmt='d')
+ax.set_ylabel("Actual Class", fontsize=14, labelpad=20)
+ax.yaxis.set_ticklabels(grid_fitter.classes_, rotation=0)
+ax.set_xlabel("Predicted Class", fontsize=14, labelpad=20)
+ax.xaxis.set_ticklabels(grid_fitter.classes_)
+plt.show()
+print(f"Overall accuracy: {conf_mat.trace()/conf_mat.sum()}")
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+[[file:./.ob-jupyter/b7856fdb4889db106e2bf7128623dd786bce76d8.png]]
+: Overall accuracy: 0.8333333333333334
+:END:
+So the real accuracy is ~83%, and the main problem is a couple of light activity examples that appear more like exercise, and a couple of exercise that appear like light activity.
+
+Since the classifier is now $\ell_1$ instead of $\ell_2$, we may have somewhat sparser coefficients:
+#+begin_src jupyter-python
+ax = sns.heatmap(grid_fitter.best_estimator_.coef_, annot=True)
+ax.set_ylabel("classes", fontsize=14, labelpad=20)
+ax.yaxis.set_ticklabels(grid_fitter.classes_, rotation=0)
+ax.set_xlabel("variables", fontsize=14, labelpad=20)
+ax.xaxis.set_ticklabels(list(aggregates)[3:], rotation=45, ha="right", rotation_mode="anchor")
+plt.show()
+#+end_src
+
+#+RESULTS:
+[[file:./.ob-jupyter/168a62d4da51ab0f28dfe72c61904769000ab721.png]]
+So exercise is best characterized as high variation in either hand or chest motion, and low magnitude of hand motion (so sudden bursts of activity, rather than steady motion). Inactivity is characterized by a low variation in the motion of hand, ankle and chest. (Light) Activity is closest to a baseline activity, since most of the coefficients are lower; it has relatively lower changes in heartrate.
 
 * Next steps
 Looking at more of the signals with a wavelet transform would probably be worthwhile, and would be best done by writing a custom plot to get them all in the same figure in some way.
-The model is ok, but there's obviously more variables to try with; ideally some sort of cross-validation scheme too, but having so few datapoints makes that somewhat difficult. Additionally, I noticed that not all of the activities are continuous, and I didn't have time to tease out the various sub-signals, which would get us more examples.
+The model is ok, but there's obviously more variables to try with.
 I would also like to try with other kinds of transforms; for example, taking the mean frequency, or only the heart rate after a start-up period.
-Also, trying to predict based on the coarse labels would be worthwhile, though one can sort of see what would happen in the confusion matrix.
+Another worthwhile potential is a more realtime classification algorithm, which predicts the current activity given the previous timeseries. This runs into some of the issues with testing algorithms on timeseries, and requires some sort of causal filter.
 
 * Footnotes
 [fn:2] I ended up only using fcwt as a matter of time.
+
+
