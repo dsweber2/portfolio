@@ -34,15 +34,8 @@ from skimage import io, transform
 #+end_src
 
 #+RESULTS:
-:RESULTS:
 : /fasterHome/anaconda3/envs/kaggle/lib/python3.10/site-packages/tqdm/auto.py:22: TqdmWarning: IProgress not found. Please update jupyter and ipywidgets. See https://ipywidgets.readthedocs.io/en/stable/user_install.html
-:   from .autonotebook import tqdm as notebook_tqdmtotal accuracy: 0.5824259789875835
-: top-3 accuracy: 0.856160458452722
-: {'butterfly': 0.7543859649122807, 'cat': 0.21179624664879357, 'chicken': 0.5457463884430177, 'cow': 0.49214659685863876, 'dog': 0.5610766045548654, 'elephant': 0.575187969924812, 'horse': 0.5185185185185185, 'sheep': 0.5736842105263158, 'spider': 0.8692070030895983, 'squirrel': 0.3393316195372751}
-: total accuracy: 0.5808978032473735
-: top-3 accuracy: 0.8580706781279848
-: {'butterfly': 0.7694235588972431, 'cat': 0.19302949061662197, 'chicken': 0.5698234349919743, 'cow': 0.4869109947643979, 'dog': 0.5652173913043478, 'elephant': 0.5263157894736842, 'horse': 0.5205761316872428, 'sheep': 0.5868421052631579, 'spider': 0.858908341915551, 'squirrel': 0.3213367609254499}
-:END:
+:   from .autonotebook import tqdm as notebook_tqdm
 
 That out of the way, we define some parameters of the process, such as batch size, maximum image size (=target_size=), the number of batches per accuracy sample (=running_average_size=), test split, a seed for reproducibility, and the number of total epochs.
 #+begin_src jupyter-python
@@ -137,7 +130,7 @@ for ii, img in enumerate(train_loader):
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/e281edaa42c9a8d8f4ce42b4386ecb26f1962760.png]]
+[[file:./.ob-jupyter/a4d6f8aabe32e792750d11ee07f83283ea449fda.png]]
 
 So we have a mix of pre-segmented images with a white background, more natural images with various backgrounds, and some cartoons. The variation in resolution is high, which could pose some difficulty; depending on how well or poorly the classifier does, we may want to upsample any particularly small images and perform more general data transformations which should be irrelevant (translation, rotation, dilation etc). The subject is generally centered, generally takes up most of the image, and is frequently the only object present (except for horses, apparently, which frequently include riders).
 * Defining a initial convnet
@@ -273,7 +266,7 @@ from models import MultiFilterLayer, FullyConnected, Animal10
 
 #+RESULTS:
 
-There are 3 runs so far, all with 4 convolutional layers; the first model has fewer convolutional channels the latter two, while the second model has more fully connected layers, and the final model has the convolutional channels .
+There are 4 runs so far, all with 4 convolutional layers; the first model has fewer convolutional channels the latter two, while the second model has more fully connected layers, the third model has more convolutional channels output, and the final model has more convolutional filters.
 #+begin_src jupyter-python
 runPostfixes = [filename[10:-4] for filename in os.listdir("runs/") if filename.startswith("lossRecord")]
 loss_records = [np.load(f"runs/lossRecord{x}.npy") for x in runPostfixes]
@@ -281,9 +274,199 @@ nChannels = [np.load(f"runs/nChannels{x}.npy", allow_pickle=True) for x in runPo
 filterSizes = [np.load(f"runs/filterSizes{x}.npy", allow_pickle=True) for x in runPostfixes]
 fully_connected = [np.load(f"runs/fully_connected{x}.npy", allow_pickle=True) for x in runPostfixes]
 strides = [np.load(f"runs/strides{x}.npy", allow_pickle=True) for x in runPostfixes]
+for x in [Animal10(nChannels[ii], filterSizes[ii], fully_connected[ii], strides=strides[ii]) for ii in range(len(runPostfixes))]:
+    print(x)
 #+end_src
 
 #+RESULTS:
+#+begin_example
+Animal10(
+  (multiFilters): ModuleList(
+    (0): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(3, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(3, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(3, 16, kernel_size=(7, 7), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 64, kernel_size=(1, 1), stride=(2, 2))
+    )
+    (1): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(64, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 64, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (2): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(64, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(64, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 128, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (3): MultiFilterLayer(
+      (norm): BatchNorm2d(96, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(128, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(128, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(128, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(96, 256, kernel_size=(1, 1), stride=(4, 4))
+    )
+  )
+  (adaptiveAve): AdaptiveAvgPool2d(output_size=(1, 1))
+  (fullyConnected): FullyConnected(
+    (layers): ModuleList(
+      (0): Linear(in_features=256, out_features=256, bias=True)
+      (1): Linear(in_features=256, out_features=256, bias=True)
+      (2): Linear(in_features=256, out_features=256, bias=True)
+      (3): Linear(in_features=256, out_features=10, bias=True)
+    )
+    (nonlin): ReLU()
+  )
+)
+Animal10(
+  (multiFilters): ModuleList(
+    (0): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(3, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(3, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(3, 16, kernel_size=(7, 7), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 64, kernel_size=(1, 1), stride=(2, 2))
+    )
+    (1): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(64, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 128, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (2): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(128, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(128, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(128, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 256, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (3): MultiFilterLayer(
+      (norm): BatchNorm2d(96, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(96, 512, kernel_size=(1, 1), stride=(4, 4))
+    )
+  )
+  (adaptiveAve): AdaptiveAvgPool2d(output_size=(1, 1))
+  (fullyConnected): FullyConnected(
+    (layers): ModuleList(
+      (0): Linear(in_features=512, out_features=512, bias=True)
+      (1): Linear(in_features=512, out_features=512, bias=True)
+      (2): Linear(in_features=512, out_features=256, bias=True)
+      (3): Linear(in_features=256, out_features=128, bias=True)
+      (4): Linear(in_features=128, out_features=10, bias=True)
+    )
+    (nonlin): ReLU()
+  )
+)
+Animal10(
+  (multiFilters): ModuleList(
+    (0): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(3, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(3, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(3, 16, kernel_size=(7, 7), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 64, kernel_size=(1, 1), stride=(2, 2))
+    )
+    (1): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(64, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(64, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 128, kernel_size=(1, 1), stride=(2, 2))
+    )
+    (2): MultiFilterLayer(
+      (norm): BatchNorm2d(48, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(128, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(128, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(128, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(48, 256, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (3): MultiFilterLayer(
+      (norm): BatchNorm2d(96, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(256, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(96, 512, kernel_size=(1, 1), stride=(4, 4))
+    )
+  )
+  (adaptiveAve): AdaptiveAvgPool2d(output_size=(1, 1))
+  (fullyConnected): FullyConnected(
+    (layers): ModuleList(
+      (0): Linear(in_features=512, out_features=256, bias=True)
+      (1): Linear(in_features=256, out_features=256, bias=True)
+      (2): Linear(in_features=256, out_features=256, bias=True)
+      (3): Linear(in_features=256, out_features=10, bias=True)
+    )
+    (nonlin): ReLU()
+  )
+)
+Animal10(
+  (multiFilters): ModuleList(
+    (0): MultiFilterLayer(
+      (norm): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(3, 32, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(3, 16, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(3, 16, kernel_size=(7, 7), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(64, 64, kernel_size=(1, 1), stride=(2, 2))
+    )
+    (1): MultiFilterLayer(
+      (norm): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(64, 32, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv3): Conv2d(64, 32, kernel_size=(7, 7), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(128, 128, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (2): MultiFilterLayer(
+      (norm): BatchNorm2d(208, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(128, 16, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(128, 64, kernel_size=(5, 5), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(208, 256, kernel_size=(1, 1), stride=(4, 4))
+    )
+    (3): MultiFilterLayer(
+      (norm): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (nonlin): ReLU()
+      (conv1): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv2): Conv2d(256, 128, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv3): Conv2d(256, 128, kernel_size=(3, 3), stride=(1, 1), padding=same)
+      (conv_next): Conv2d(512, 512, kernel_size=(1, 1), stride=(4, 4))
+    )
+  )
+  (adaptiveAve): AdaptiveAvgPool2d(output_size=(1, 1))
+  (fullyConnected): FullyConnected(
+    (layers): ModuleList(
+      (0): Linear(in_features=512, out_features=512, bias=True)
+      (1): Linear(in_features=512, out_features=512, bias=True)
+      (2): Linear(in_features=512, out_features=256, bias=True)
+      (3): Linear(in_features=256, out_features=128, bias=True)
+      (4): Linear(in_features=128, out_features=10, bias=True)
+    )
+    (nonlin): ReLU()
+  )
+)
+#+end_example
 
 Lets plot the loss, for each run along with the smoothed version.
 #+begin_src jupyter-python
@@ -300,6 +483,7 @@ def plot_with_error_bars(x,raw,label,color):
 plot_with_error_bars(smoothed[0], loss_records[0], "first run", "tab:blue")
 plot_with_error_bars(100*smoothed[1], 100*loss_records[1], "second run", "tab:orange")
 plot_with_error_bars(100*smoothed[2], 100*loss_records[2], "third run", "tab:green")
+plot_with_error_bars(100*smoothed[3], 100*loss_records[3], "fourth run", "tab:red")
 ax.set_xlabel('Epoch')
 ax.set_ylabel('Cross-entropy Loss')
 ax.spines['top'].set_visible(False)
@@ -309,15 +493,23 @@ plt.show()
 #+end_src
 
 #+RESULTS:
-[[file:./.ob-jupyter/ec5595a8f7ec026bf55593e58d5f0a4aefa57885.png]]
-Since this is a cross-entropy loss for exact labels, we can interpret the value as $-\log(p(\textrm{correct label}))$; random guessing is then $\log\big(\frac{1}{10}\big)\approx 2.3$ which is approximately where the error starts. After training, the first model assigns a probability of
+[[file:./.ob-jupyter/1d0a66aa1084f14445a028c29ba9830f0fd769d7.png]]
+Since this is a cross-entropy loss for exact labels, we can interpret the value as $-\log(p(\textrm{correct label}))$; random guessing is then $\log\big(\frac{1}{10}\big)\approx 2.3$ which is approximately where the error starts. After training, the last model assigns a probability of
+#+begin_src jupyter-python
+(smoothed[-1][-1], np.exp(-smoothed[-1][-1]))
+#+end_src
+
+#+RESULTS:
+| 0.0037379531566012363 | 0.9962690242937976 |
+to the correct value, while the first model assigns a probability of
 #+begin_src jupyter-python
 np.exp(-smoothed[0][-1])
 #+end_src
 
 #+RESULTS:
 : 0.48497356496045063
-to the correct value (so around half). To see how this translates to accuracy on the training set:
+
+To see whether the last model's high accuracy on the training set is a sign of correct learning or overfitting, lets evaluate the model on the training set:
 #+begin_src jupyter-python
 def evaluate_model_n(model_no):
     animal_classifier = Animal10(nChannels[model_no], filterSizes[model_no], fully_connected[model_no], strides=strides[model_no])
@@ -356,9 +548,9 @@ evaluate_model_n(0)
 #+end_src
 
 #+RESULTS:
-: total accuracy: 0.6233046800382044
-: top-3 accuracy: 0.8771728748806112
-: {'butterfly': 0.681704260651629, 'cat': 0.38337801608579086, 'chicken': 0.6195826645264848, 'cow': 0.5157068062827225, 'dog': 0.6325051759834368, 'elephant': 0.5075187969924813, 'horse': 0.5185185185185185, 'sheep': 0.5789473684210527, 'spider': 0.8661174047373842, 'squirrel': 0.5295629820051414}
+: total accuracy: 0.6164278892072589
+: top-3 accuracy: 0.8823304680038204
+: {'butterfly': 0.6716791979949874, 'cat': 0.40214477211796246, 'chicken': 0.608346709470305, 'cow': 0.4973821989528796, 'dog': 0.6149068322981367, 'elephant': 0.5451127819548872, 'horse': 0.49176954732510286, 'sheep': 0.5921052631578947, 'spider': 0.8455200823892894, 'squirrel': 0.5552699228791774}
 
 So the first model has an overall accuracy of ~62%, with spiders being the most accurately classified, while cat is the most confused
 
@@ -367,9 +559,9 @@ evaluate_model_n(1)
 #+end_src
 
 #+RESULTS:
-: total accuracy: 0.5808978032473735
-: top-3 accuracy: 0.8649474689589303
-: {'butterfly': 0.7293233082706767, 'cat': 0.1769436997319035, 'chicken': 0.5682182985553772, 'cow': 0.5209424083769634, 'dog': 0.5786749482401656, 'elephant': 0.5451127819548872, 'horse': 0.5020576131687243, 'sheep': 0.5815789473684211, 'spider': 0.8640576725025747, 'squirrel': 0.3161953727506427}
+: total accuracy: 0.5786055396370583
+: top-3 accuracy: 0.8574976122254059
+: {'butterfly': 0.7192982456140351, 'cat': 0.2037533512064343, 'chicken': 0.5617977528089888, 'cow': 0.4581151832460733, 'dog': 0.582815734989648, 'elephant': 0.5375939849624061, 'horse': 0.5267489711934157, 'sheep': 0.5605263157894737, 'spider': 0.8722966014418125, 'squirrel': 0.3059125964010283}
 
 The second model is a bit worse
 
@@ -378,14 +570,26 @@ evaluate_model_n(2)
 #+end_src
 
 #+RESULTS:
-: total accuracy: 0.4802292263610315
-: top-3 accuracy: 0.6250238777459408
-: {'butterfly': 0.6390977443609023, 'cat': 0.6621983914209115, 'chicken': 0.7528089887640449, 'cow': 0.0, 'dog': 0.0, 'elephant': 0.0, 'horse': 0.5720164609053497, 'sheep': 0.6447368421052632, 'spider': 0.8836251287332647, 'squirrel': 0.41645244215938304}
+: total accuracy: 0.4878701050620821
+: top-3 accuracy: 0.626552053486151
+: {'butterfly': 0.6591478696741855, 'cat': 0.6702412868632708, 'chicken': 0.7672552166934189, 'cow': 0.0, 'dog': 0.0, 'elephant': 0.0, 'horse': 0.5946502057613169, 'sheep': 0.6473684210526316, 'spider': 0.8753861997940268, 'squirrel': 0.45758354755784064}
 
 Perhaps unsurprisingly given its error on the training set, the third model had the worst accuracy at ~48%.
+More importantly however, the cross entropy loss on the training data set is high, suggesting that none of the first 3 models are sufficiently expressive to capture the full variation in the data.
+The final model, which has a low cross entropy has a test accuracy of
 
-More importantly however, the cross entropy loss on the training data set is significantly, suggesting that none of these models are sufficiently expressive to capture the full variation in the data.
+#+begin_src jupyter-python
+evaluate_model_n(3)
+#+end_src
+
+#+RESULTS:
+: total accuracy: 0.6693409742120344
+: top-3 accuracy: 0.8981852913085004
+: {'butterfly': 0.7192982456140351, 'cat': 0.40482573726541554, 'chicken': 0.7528089887640449, 'cow': 0.5863874345549738, 'dog': 0.6066252587991718, 'elephant': 0.6616541353383458, 'horse': 0.5925925925925926, 'sheep': 0.7026315789473684, 'spider': 0.8661174047373842, 'squirrel': 0.5526992287917738}
+
 * More extensive model hyperparameter testing
+https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py
+https://arxiv.org/abs/2106.10165
 * Data augmentation
 * Doing some transfer learning
 * Building an interpretable model

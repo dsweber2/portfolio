@@ -187,45 +187,59 @@ def full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epo
     print(correct_class)
 
 
-n_channels = (
-    [3],
-    [16, 16, 16, 64],
-    [16, 16, 16, 64],
-    [16, 16, 16, 128],
-    [32, 32, 32, 256],
-)
-filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
-fully_connected = (256, 256, 256, 10)
-strides = [2, 4, 4, 4]
-n_epochs = 63
-full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
+# n_channels = (
+#     [3],
+#     [16, 16, 16, 64],
+#     [16, 16, 16, 64],
+#     [16, 16, 16, 128],
+#     [32, 32, 32, 256],
+# )
+# filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
+# fully_connected = (256, 256, 256, 10)
+# strides = [2, 4, 4, 4]
+# n_epochs = 63
+# full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
 
 
 # increasing the number of output convolutional channels
-n_channels = (
-    [3],
-    [16, 16, 16, 64],
-    [16, 16, 16, 128],
-    [16, 16, 16, 256],
-    [32, 32, 32, 512],
-)
-filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
-fully_connected = (512, 512, 256, 128, 10)
-strides = [2, 4, 4, 4]
-n_epochs = 59
-full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
+# n_channels = (
+#     [3],
+#     [16, 16, 16, 64],
+#     [16, 16, 16, 128],
+#     [16, 16, 16, 256],
+#     [32, 32, 32, 512],
+# )
+# filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
+# fully_connected = (512, 512, 256, 128, 10)
+# strides = [2, 4, 4, 4]
+# n_epochs = 59
+# full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
 
 
 # decreasing the number of fully connected layers
+# n_channels = (
+#     [3],
+#     [16, 16, 16, 64],
+#     [16, 16, 16, 128],
+#     [16, 16, 16, 256],
+#     [32, 32, 32, 512],
+# )
+# filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
+# fully_connected = (256, 256, 256, 10)
+# strides = [2, 2, 4, 4]
+# n_epochs = 27
+# full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
+
+
 n_channels = (
     [3],
-    [16, 16, 16, 64],
-    [16, 16, 16, 128],
-    [16, 16, 16, 256],
-    [32, 32, 32, 512],
+    [32, 16, 16, 64],
+    [64, 32, 32, 128],
+    [128, 16, 64, 256],
+    [256, 128, 128, 512],
 )
-filterSizes = ([3, 5, 7], [3, 5, 5], [3, 3, 5], [3, 3, 3])
-fully_connected = (256, 256, 256, 10)
-strides = [2, 2, 4, 4]
-n_epochs = 27
+filterSizes = ([3, 5, 7], [3, 5, 7], [3, 3, 5], [3, 3, 3])
+fully_connected = (512, 512, 256, 128, 10)
+strides = [2, 4, 4, 4]
+n_epochs = 59
 full_train_test_run(n_channels, filterSizes, fully_connected, strides, n_epochs)
